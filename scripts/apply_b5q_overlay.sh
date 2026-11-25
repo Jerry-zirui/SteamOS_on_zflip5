@@ -235,6 +235,41 @@ for base in [R / "etc", ETC_UPPER]:
         'matches = [ { node.name = "alsa_output.platform-sound.HiFi__Speaker__sink" alsa.card_name = "SM8650-APS2" } ]',
     )
 
+# BlueZ gamepad compatibility (disable RPA privacy & strict classic bonding)
+for base in [R / "etc", ETC_UPPER]:
+    if base is None:
+        continue
+    patch_file(
+        base / "bluetooth/main.conf",
+        "Privacy = off",
+        "Privacy = device",
+        "Privacy = off",
+    )
+    patch_file(
+        base / "bluetooth/main.conf",
+        "JustWorksRepairing = always",
+        "#JustWorksRepairing = never",
+        "JustWorksRepairing = always",
+    )
+    patch_file(
+        base / "bluetooth/main.conf",
+        "\nAutoEnable=true",
+        "#AutoEnable=true",
+        "AutoEnable=true",
+    )
+    patch_file(
+        base / "bluetooth/input.conf",
+        "ClassicBondedOnly=false",
+        "#ClassicBondedOnly=true",
+        "ClassicBondedOnly=false",
+    )
+    patch_file(
+        base / "bluetooth/input.conf",
+        "\nUserspaceHID=true",
+        "#UserspaceHID=true",
+        "UserspaceHID=true",
+    )
+
 # gamescope-session: disable VRR probe on command-mode single-rate S6E3FAC panel
 patch_file(
     R / "usr/lib/steamos/gamescope-session",
