@@ -254,6 +254,20 @@ patch_file(
     '--default-touch-mode "${GAMESCOPE_TOUCH_MODE:-4}"',
 )
 
+# steamwebhelper.sh: disable Gamescope WSI XWayland-bypass for CEF UI child windows
+# so overlays (MainMenu, QuickAccess, modals, keyboard) composite via Xwayland DRI3
+# instead of fighting over the single parent Wayland surface; 3D games still inherit ENABLE_GAMESCOPE_WSI=1.
+for u in ("steamos", "deck"):
+    patch_file(
+        R / f"home/{u}/.local/share/Steam/steamrtarm64/steamwebhelper.sh",
+        "DISABLE_GAMESCOPE_WSI",
+        "export LIBGL_KOPPER_DISABLE=true",
+        "export LIBGL_KOPPER_DISABLE=true\n"
+        "# Prevent Gamescope WSI XWayland-bypass from overriding parent 0x2200035 across CEF child windows\n"
+        "# (MainMenu, QuickAccess, modals, virtual keyboard); 3D games still inherit ENABLE_GAMESCOPE_WSI=1.\n"
+        "export DISABLE_GAMESCOPE_WSI=1",
+    )
+
 # is-system-disk: never expose /dev/sda* UFS partitions to Steam Storage format UI
 patch_file(
     R / "usr/lib/steamos-arm/is-system-disk",
