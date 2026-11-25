@@ -121,6 +121,11 @@ for sub in qcom/sm8550 ath11k/WCN6855 qca tsp_synaptics; do
         rsync -a --exclude='._*' "$FW_SRC/$sub/" "$R/usr/lib/firmware/$sub/"
     fi
 done
+# WCN6855 BT NVM: btqca requests qca/wcnhpnv21g.bin before falling back to generic qca/hpnv21g.bin;
+# B5Q stock board NVM hpnv21g.bb9 restores ~30 dB BLE RF margin over generic hpnv21g.bin.
+if [ -f "$R/usr/lib/firmware/qca/hpnv21g.bb9" ]; then
+    ln -sfn hpnv21g.bb9 "$R/usr/lib/firmware/qca/wcnhpnv21g.bin"
+fi
 for f in tfa98xx.cnt regulatory.db regulatory.db.p7s; do
     [ -f "$FW_SRC/$f" ] && cp -f "$FW_SRC/$f" "$R/usr/lib/firmware/$f"
 done
