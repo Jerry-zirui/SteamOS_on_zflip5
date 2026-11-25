@@ -10,6 +10,7 @@
  */
 
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -25,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #define S3916_I2C_ADDR		0x20
@@ -53,6 +55,130 @@
 
 static volatile sig_atomic_t g_stop = 0;
 static bool g_debug = false;
+
+enum touch_rotation {
+	ROT_NONE = 0,
+	ROT_RIGHT = 1,       /* gamescope --force-orientation right:      tx = y,         ty = MAX_X - x */
+	ROT_LEFT = 2,        /* gamescope --force-orientation left:       tx = MAX_Y - y, ty = x */
+	ROT_UPSIDEDOWN = 3,  /* gamescope --force-orientation upsidedown: tx = MAX_X - x, ty = MAX_Y - y */
+};
+
+static const char *rot_name(enum touch_rotation r)
+{
+	switch (r) {
+	case ROT_RIGHT:
+		return "right";
+	case ROT_LEFT:
+		return "left";
+	case ROT_UPSIDEDOWN:
+		return "upsidedown";
+	case ROT_NONE:
+	default:
+		return "none";
+	}
+}
+
+static bool parse_rot_value(const char *val, enum touch_rotation *out)
+{
+	if (strcmp(val, "right") == 0) {
+		*out = ROT_RIGHT;
+		return true;
+	}
+	if (strcmp(val, "left") == 0) {
+		*out = ROT_LEFT;
+		return true;
+	}
+	if (strcmp(val, "upsidedown") == 0) {
+		*out = ROT_UPSIDEDOWN;
+		return true;
+	}
+	if (strcmp(val, "normal") == 0 || strcmp(val, "none") == 0) {
+		*out = ROT_NONE;
+		return true;
+	}
+	return false;
+}
+
+static enum touch_rotation detect_gamescope_rotation(void)
+{
+	DIR *d = opendir("/proc");
+	struct dirent *de;
+
+	if (!d)
+		return ROT_NONE;
+
+	while ((de = readdir(d)) != NULL) {
+		if (!isdigit((unsigned char)de->d_name[0]))
+			continue;
+
+		char path[320];
+		char comm[64];
+		int n = snprintf(path, sizeof(path), "/proc/%s/comm", de->d_name);
+		if (n <= 0 || (size_t)n >= sizeof(path))
+			continue;
+
+		int fd = open(path, O_RDONLY);
+		if (fd < 0)
+			continue;
+		ssize_t rn = read(fd, comm, sizeof(comm) - 1);
+		close(fd);
+		if (rn <= 0)
+			continue;
+		comm[rn] = '\0';
+		char *nl = strchr(comm, '\n');
+		if (nl)
+			*nl = '\0';
+		if (strcmp(comm, "gamescope-wl") != 0 && strcmp(comm, "gamescope") != 0)
+			continue;
+
+		n = snprintf(path, sizeof(path), "/proc/%s/cmdline", de->d_name);
+		if (n <= 0 || (size_t)n >= sizeof(path)) {
+			closedir(d);
+			return ROT_RIGHT;
+		}
+		fd = open(path, O_RDONLY);
+		if (fd < 0) {
+			closedir(d);
+			return ROT_RIGHT;
+		}
+		char cmd[4096];
+		ssize_t cn = read(fd, cmd, sizeof(cmd) - 1);
+		close(fd);
+		if (cn <= 0) {
+			closedir(d);
+			return ROT_RIGHT;
+		}
+		cmd[cn] = '\0';
+
+		/* NUL-separated tokens; default to right if --force-orientation is omitted. */
+		ssize_t pos = 0;
+		while (pos < cn) {
+			const char *tok = &cmd[pos];
+			size_t tlen = strlen(tok);
+			const char *next = (pos + (ssize_t)tlen + 1 < cn) ? &cmd[pos + (ssize_t)tlen + 1] : NULL;
+			enum touch_rotation r;
+
+			if (strcmp(tok, "--force-orientation") == 0 && next) {
+				if (parse_rot_value(next, &r)) {
+					closedir(d);
+					return r;
+				}
+			} else if (strncmp(tok, "--force-orientation=", 20) == 0) {
+				if (parse_rot_value(tok + 20, &r)) {
+					closedir(d);
+					return r;
+				}
+			}
+			pos += (ssize_t)tlen + 1;
+		}
+
+		closedir(d);
+		return ROT_RIGHT;
+	}
+
+	closedir(d);
+	return ROT_NONE;
+}
 
 static void on_signal(int sig)
 {
@@ -432,7 +558,8 @@ static void release_all_slots(int ufd, struct mt_state *st)
 		emit_ev(ufd, EV_SYN, SYN_REPORT, 0);
 }
 
-static void handle_sec_coord(int ufd, struct mt_state *st, const uint8_t *data, uint16_t len)
+static void handle_sec_coord(int ufd, struct mt_state *st, const uint8_t *data, uint16_t len,
+			     enum touch_rotation rot)
 {
 	int count = len / 16;
 	bool reported = false;
@@ -448,10 +575,39 @@ static void handle_sec_coord(int ufd, struct mt_state *st, const uint8_t *data, 
 		uint8_t minor = b[5];
 		uint8_t z = b[6] & 0x3F;
 
+		if (x > MAX_X)
+			x = MAX_X;
+		if (y > MAX_Y)
+			y = MAX_Y;
+
+		uint16_t tx = x, ty = y;
+		switch (rot) {
+		case ROT_RIGHT:
+			tx = y;
+			ty = (uint16_t)(MAX_X - x);
+			break;
+		case ROT_LEFT:
+			tx = (uint16_t)(MAX_Y - y);
+			ty = x;
+			break;
+		case ROT_UPSIDEDOWN:
+			tx = (uint16_t)(MAX_X - x);
+			ty = (uint16_t)(MAX_Y - y);
+			break;
+		case ROT_NONE:
+		default:
+			break;
+		}
+
 		if (g_debug) {
-			fprintf(stderr, "  [0xC1 #%d] eid=%u slot=%u act=%u x=%u y=%u maj=%u min=%u z=%u raw=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-				i, eid, slot, action, x, y, major, minor, z,
-				b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+			if (rot != ROT_NONE) {
+				fprintf(stderr, "  [0xC1 #%d] eid=%u slot=%u act=%u raw=(%u,%u) rot=(%u,%u) maj=%u min=%u z=%u\n",
+					i, eid, slot, action, x, y, tx, ty, major, minor, z);
+			} else {
+				fprintf(stderr, "  [0xC1 #%d] eid=%u slot=%u act=%u x=%u y=%u maj=%u min=%u z=%u raw=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+					i, eid, slot, action, x, y, major, minor, z,
+					b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+			}
 		}
 
 		if (eid != 0 || slot >= MAX_SLOTS)
@@ -467,11 +623,11 @@ static void handle_sec_coord(int ufd, struct mt_state *st, const uint8_t *data, 
 				st->next_tid = (st->next_tid + 1) & 0xFFFF;
 				emit_ev(ufd, EV_ABS, ABS_MT_TRACKING_ID, st->next_tid);
 			}
-			st->x[slot] = x;
-			st->y[slot] = y;
+			st->x[slot] = tx;
+			st->y[slot] = ty;
 			st->pressure[slot] = z;
-			emit_ev(ufd, EV_ABS, ABS_MT_POSITION_X, x);
-			emit_ev(ufd, EV_ABS, ABS_MT_POSITION_Y, y);
+			emit_ev(ufd, EV_ABS, ABS_MT_POSITION_X, tx);
+			emit_ev(ufd, EV_ABS, ABS_MT_POSITION_Y, ty);
 			emit_ev(ufd, EV_ABS, ABS_MT_TOUCH_MAJOR, major);
 			emit_ev(ufd, EV_ABS, ABS_MT_TOUCH_MINOR, minor);
 			emit_ev(ufd, EV_ABS, ABS_MT_PRESSURE, z);
@@ -523,12 +679,25 @@ static void handle_sec_coord(int ufd, struct mt_state *st, const uint8_t *data, 
 int main(int argc, char **argv)
 {
 	bool wake_reset = false;
+	bool auto_rotate = true;
+	enum touch_rotation fixed_rot = ROT_NONE;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-d") == 0)
 			g_debug = true;
 		else if (strcmp(argv[i], "--wake-reset") == 0)
 			wake_reset = true;
+		else if (strncmp(argv[i], "--rotate=", 9) == 0) {
+			const char *val = argv[i] + 9;
+			if (strcmp(val, "auto") == 0) {
+				auto_rotate = true;
+			} else if (parse_rot_value(val, &fixed_rot)) {
+				auto_rotate = false;
+			} else {
+				fprintf(stderr, "[b5q-touchd] invalid --rotate value: %s\n", val);
+				return 1;
+			}
+		}
 	}
 
 	signal(SIGINT, on_signal);
@@ -575,9 +744,14 @@ int main(int argc, char **argv)
 	s3916_configure_reports(i2c_fd, gpio_fd);
 
 	bool disp_on = read_display_on(dpms_path);
-	fprintf(stderr, "[b5q-touchd] Ready on %s (0x%02x) + %s line %d dpms=%s (%s) -> uinput (4096x4096, 10 slots)\n",
+	enum touch_rotation active_rot = auto_rotate ? detect_gamescope_rotation() : fixed_rot;
+	struct timespec last_rot_check = { 0, 0 };
+	clock_gettime(CLOCK_MONOTONIC, &last_rot_check);
+
+	fprintf(stderr, "[b5q-touchd] Ready on %s (0x%02x) + %s line %d dpms=%s (%s) rotate=%s (%s) -> uinput (4096x4096, 10 slots)\n",
 		i2c_path, S3916_I2C_ADDR, gpio_path, S3916_ATTN_GPIO,
-		dpms_path[0] ? dpms_path : "none", disp_on ? "On" : "Off");
+		dpms_path[0] ? dpms_path : "none", disp_on ? "On" : "Off",
+		rot_name(active_rot), auto_rotate ? "auto" : "fixed");
 	fflush(stderr);
 
 	struct mt_state st;
@@ -599,6 +773,22 @@ int main(int argc, char **argv)
 				struct pollfd cp = { .fd = gpio_fd, .events = POLLIN };
 				if (poll(&cp, 1, 0) <= 0)
 					break;
+			}
+		}
+
+		if (auto_rotate) {
+			struct timespec now;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			if (now.tv_sec > last_rot_check.tv_sec ||
+			    (now.tv_sec == last_rot_check.tv_sec && now.tv_nsec - last_rot_check.tv_nsec >= 1000000000L)) {
+				last_rot_check = now;
+				enum touch_rotation new_rot = detect_gamescope_rotation();
+				if (new_rot != active_rot) {
+					release_all_slots(ufd, &st);
+					active_rot = new_rot;
+					fprintf(stderr, "[b5q-touchd] touch rotation -> %s\n", rot_name(active_rot));
+					fflush(stderr);
+				}
 			}
 		}
 
@@ -624,7 +814,7 @@ int main(int argc, char **argv)
 			got_irq = false;
 			if (s3916_read_oneshot(i2c_fd, &code, &plen, payload) == 0) {
 				if (code == REPORT_SEC_COORD && plen >= 16) {
-					handle_sec_coord(ufd, &st, payload, plen);
+					handle_sec_coord(ufd, &st, payload, plen, active_rot);
 				} else if (code == REPORT_IDENTIFY) {
 					fprintf(stderr, "[b5q-touchd] S3916A IDENTIFY (chip reset detected) -> reconfiguring reports\n");
 					fflush(stderr);

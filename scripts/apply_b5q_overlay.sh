@@ -246,7 +246,7 @@ patch_file(
     "fi",
 )
 
-# gamescope-session: allow environment.d GAMESCOPE_TOUCH_MODE override (1=left click for Steam UI touch)
+# gamescope-session: allow environment.d GAMESCOPE_TOUCH_MODE override (4=passthrough direct touch, 1=left-click mouse)
 patch_file(
     R / "usr/lib/steamos/gamescope-session",
     "GAMESCOPE_TOUCH_MODE",
