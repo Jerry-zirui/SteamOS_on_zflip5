@@ -139,6 +139,7 @@ install -m 0755 "$BIN_SRC/hexagonrpcd" "$R/usr/local/bin/hexagonrpcd"
 rsync -rl --no-perms --no-owner --no-group --exclude='._*' "$OVL/" "$R/"
 chown -R root:root "$R/usr/local/bin/"b5q-* "$R/usr/lib/steamos-arm/"b5q-* \
                    "$R/usr/lib/systemd/system/"b5q-*.service \
+                   "$R/usr/lib/systemd/user/"b5q-*.service \
                    "$R/usr/lib/systemd/system/sm8550-bluetooth-setup.service.d" \
                    "$R/usr/lib/environment.d/60-b5q-gamescope.conf" \
                    "$R/usr/lib/modules-load.d/b5q.conf" \
@@ -146,11 +147,16 @@ chown -R root:root "$R/usr/local/bin/"b5q-* "$R/usr/lib/steamos-arm/"b5q-* \
                    "$R/usr/lib/NetworkManager/conf.d/45-b5q-usb0-unmanaged.conf"
 chmod 0755 "$R/usr/local/bin/"b5q-* "$R/usr/lib/steamos-arm/"b5q-*
 chmod 0644 "$R/usr/lib/systemd/system/"b5q-*.service \
+           "$R/usr/lib/systemd/user/"b5q-*.service \
            "$R/usr/lib/systemd/system/sm8550-bluetooth-setup.service.d/10-b5q.conf" \
            "$R/usr/lib/environment.d/60-b5q-gamescope.conf" \
            "$R/usr/lib/modules-load.d/b5q.conf" \
            "$R/usr/lib/udev/rules.d/60-b5q-gamepads.rules" \
            "$R/usr/lib/NetworkManager/conf.d/45-b5q-usb0-unmanaged.conf"
+
+mkdir -p "$R/usr/lib/systemd/user/gamescope-session.target.wants"
+ln -sfn ../b5q-gamescope-ultrawide.service \
+    "$R/usr/lib/systemd/user/gamescope-session.target.wants/b5q-gamescope-ultrawide.service"
 
 ln -sfn ../../Qualcomm/sm8550/SM8550-Samsung-B5Q.conf \
     "$R/usr/share/alsa/ucm2/conf.d/sm8550/SM8550-Samsung-B5Q.conf"
@@ -238,6 +244,14 @@ patch_file(
     'if grep -qa "Samsung Galaxy Z Flip5" /sys/firmware/devicetree/base/model 2>/dev/null; then\n'
     "  export STEAM_GAMESCOPE_VRR_SUPPORTED=0\n"
     "fi",
+)
+
+# gamescope-session: allow environment.d GAMESCOPE_TOUCH_MODE override (1=left click for Steam UI touch)
+patch_file(
+    R / "usr/lib/steamos/gamescope-session",
+    "GAMESCOPE_TOUCH_MODE",
+    "--default-touch-mode 4",
+    '--default-touch-mode "${GAMESCOPE_TOUCH_MODE:-4}"',
 )
 
 # is-system-disk: never expose /dev/sda* UFS partitions to Steam Storage format UI

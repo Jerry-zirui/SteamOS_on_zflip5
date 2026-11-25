@@ -1,0 +1,13 @@
+[Unit]
+Description=Z Flip 5 Gamescope 22:9 Ultrawide Xwayland Mode Enforcer (1760x720)
+PartOf=gamescope-session.target
+After=gamescope-session.service steam.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/steamos-arm/b5q-gamescope-ultrawide
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=gamescope-session.target

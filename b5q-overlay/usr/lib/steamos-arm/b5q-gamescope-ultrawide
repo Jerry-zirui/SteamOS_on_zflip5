@@ -1,0 +1,24 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jerry-zirui (https://github.com/Jerry-zirui/SteamOS_on_zflip5)
+#
+# Keep Gamescope Xwayland #0 in exact 22:9 ultrawide (1760x720 -> 1.5x to 2640x1080)
+# when Steam tries to revert DISPLAY=:0 back to 16:9 1920x1080.
+set -u
+
+export DISPLAY="${DISPLAY:-:0}"
+
+# Wait up to 60s for Gamescope Xwayland :0 and XRR state to become ready
+for _ in $(seq 1 60); do
+  xprop -root GAMESCOPE_PID >/dev/null 2>&1 && break
+  sleep 1
+done
+
+while true; do
+  cur_res="$(xrandr 2>/dev/null | awk '/\*/{print $1; exit}')"
+  if [[ "$cur_res" == "1920x1080" || "$cur_res" == "2640x1080" ]]; then
+    xprop -root -f GAMESCOPE_XWAYLAND_MODE_CONTROL 32c \
+      -set GAMESCOPE_XWAYLAND_MODE_CONTROL "0, 1760, 720, 1" >/dev/null 2>&1 || true
+  fi
+  sleep 3
+done
