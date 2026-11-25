@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Jerry-zirui (https://github.com/Jerry-zirui/SteamOS_on_zflip5)
 #
 # Decompress Zaviya SM8550 v1.5.0 image, verify checksum, extract p2 (root) + p3 (home)
-# into a 32 GiB sparse ext4 loop image at /steamos/root.img, and run apply_b5q_overlay.sh.
+# into a 250 GiB (override via IMG_SIZE) sparse ext4 loop image at /steamos/root.img, and run apply_b5q_overlay.sh.
 # Usage: deploy_zaviya_rootfs.sh [--inspect-only]
 set -euo pipefail
 
@@ -15,7 +15,7 @@ MNT_P2="${WORK}/mnt_p2"
 MNT_P3="${WORK}/mnt_p3"
 MNT_ROOTFS="${WORK}/rootfs"
 ROOT_IMG="/steamos/root.img"
-IMG_SIZE="32G"
+IMG_SIZE="${IMG_SIZE:-250G}"
 
 INSPECT_ONLY=0
 [ "${1:-}" = "--inspect-only" ] && INSPECT_ONLY=1
