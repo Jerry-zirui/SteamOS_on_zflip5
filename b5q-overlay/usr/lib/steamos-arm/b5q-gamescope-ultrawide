@@ -14,11 +14,33 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
-while true; do
-  cur_res="$(xrandr 2>/dev/null | awk '/\*/{print $1; exit}')"
+enforce_ultrawide() {
+  local cur_res
+  cur_res="$(xrandr --current 2>/dev/null | awk '/\*/{print $1; exit}')"
   if [[ "$cur_res" == "1920x1080" || "$cur_res" == "2640x1080" ]]; then
     xprop -root -f GAMESCOPE_XWAYLAND_MODE_CONTROL 32c \
       -set GAMESCOPE_XWAYLAND_MODE_CONTROL "0, 1760, 720, 1" >/dev/null 2>&1 || true
   fi
-  sleep 3
+}
+
+# Brief startup settle window (catch Steam's initial mode switch)
+for _ in $(seq 1 20); do
+  enforce_ultrawide
+  sleep 1
 done
+
+# Event-driven watch: avoid periodic xrandr output probing that flickers overlay bars
+if command -v xev >/dev/null 2>&1; then
+  xev -root -event randr 2>/dev/null | while IFS= read -r line; do
+    case "$line" in
+      *RRScreenChangeNotify*|*RRNotify*)
+        enforce_ultrawide
+        ;;
+    esac
+  done
+else
+  while true; do
+    enforce_ultrawide
+    sleep 15
+  done
+fi
