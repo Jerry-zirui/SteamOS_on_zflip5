@@ -47,7 +47,10 @@ mask_unit() {
     local unit="$1"
     mkdir -p "$R/etc/systemd/system"
     ln -sfn /dev/null "$R/etc/systemd/system/$unit"
-    rm -f "$R/etc/systemd/system/multi-user.target.wants/$unit" \
+    rm -f "$R/usr/lib/systemd/system/multi-user.target.wants/$unit" \
+          "$R/usr/lib/systemd/system/local-fs.target.wants/$unit" \
+          "$R/usr/lib/systemd/system/graphical.target.wants/$unit" \
+          "$R/etc/systemd/system/multi-user.target.wants/$unit" \
           "$R/etc/systemd/system/local-fs.target.wants/$unit" \
           "$R/etc/systemd/system/graphical.target.wants/$unit" 2>/dev/null || true
     if [ -n "$ETC_UPPER" ]; then
@@ -122,9 +125,9 @@ for sub in qcom/sm8550 ath11k/WCN6855 qca tsp_synaptics; do
     fi
 done
 # WCN6855 BT NVM: btqca requests qca/wcnhpnv21g.bin before falling back to generic qca/hpnv21g.bin;
-# B5Q stock board NVM hpnv21g.bb9 restores ~30 dB BLE RF margin over generic hpnv21g.bin.
-if [ -f "$R/usr/lib/firmware/qca/hpnv21g.bb9" ]; then
-    ln -sfn hpnv21g.bb9 "$R/usr/lib/firmware/qca/wcnhpnv21g.bin"
+# B5Q iPA 00092 board NVM hpnv21.b9a (non-g) restores full Classic/BLE RF margin and clean JustWorks HOGP.
+if [ -f "$R/usr/lib/firmware/qca/hpnv21.b9a" ]; then
+    ln -sfn hpnv21.b9a "$R/usr/lib/firmware/qca/wcnhpnv21g.bin"
 fi
 for f in tfa98xx.cnt regulatory.db regulatory.db.p7s; do
     [ -f "$FW_SRC/$f" ] && cp -f "$FW_SRC/$f" "$R/usr/lib/firmware/$f"
@@ -263,6 +266,30 @@ for base in [R / "etc", ETC_UPPER]:
         "AutoEnable=true",
     )
     patch_file(
+        base / "bluetooth/main.conf",
+        "\nMinConnectionInterval=6",
+        "#MinConnectionInterval=",
+        "MinConnectionInterval=6",
+    )
+    patch_file(
+        base / "bluetooth/main.conf",
+        "\nMaxConnectionInterval=12",
+        "#MaxConnectionInterval=",
+        "MaxConnectionInterval=12",
+    )
+    patch_file(
+        base / "bluetooth/main.conf",
+        "\nConnectionLatency=0",
+        "#ConnectionLatency=",
+        "ConnectionLatency=0",
+    )
+    patch_file(
+        base / "bluetooth/main.conf",
+        "\nConnectionSupervisionTimeout=400",
+        "#ConnectionSupervisionTimeout=",
+        "ConnectionSupervisionTimeout=400",
+    )
+    patch_file(
         base / "bluetooth/input.conf",
         "ClassicBondedOnly=false",
         "#ClassicBondedOnly=true",
@@ -351,7 +378,7 @@ for u in steamos-sm8550-expand-home.service konkrd.service \
          steamos-arm-power.service odin3-thor-autoinstall.service \
          dsp_service.service iris-driver-rebind.service \
          steamos-arm-update.service steamos-arm-update-cleanup.service \
-         steamos-arm-efi-sync.service firewalld.service; do
+         steamos-arm-efi-sync.service firewalld.service softapmanager.service; do
     mask_unit "$u"
 done
 
