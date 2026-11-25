@@ -1,0 +1,28 @@
+# Large raw partition images, downloads & firmware dumps
+*.img
+*.img.zst
+*.zst
+*.7z
+*.7z.*
+*.sau
+*.sau.*
+*.zip
+*.tar
+*.tar.gz
+*.tar.xz
+*.sparseimage
+*.bin
+*.mbn
+*.mdt
+*.b[0-9][0-9]
+*.elf
+
+# Host tools & temporary files
+.DS_Store
+.vscode/
+.idea/
+/build/
+/out/
+/tmp/
+/__pycache__/
+*.pyc

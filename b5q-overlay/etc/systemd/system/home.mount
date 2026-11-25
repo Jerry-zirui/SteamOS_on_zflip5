@@ -1,0 +1,13 @@
+# Samsung Galaxy Z Flip 5: /home lives on the SteamOS loop root image (/steamos/root.img),
+# so bind /home onto itself so SteamOS units ordering After=home.mount start normally.
+[Unit]
+Description=Home Directory (on SteamOS loop rootfs)
+DefaultDependencies=no
+Conflicts=umount.target
+Before=local-fs.target umount.target
+
+[Mount]
+What=/home
+Where=/home
+Type=none
+Options=bind

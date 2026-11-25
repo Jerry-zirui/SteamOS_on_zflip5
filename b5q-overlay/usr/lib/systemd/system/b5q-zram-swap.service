@@ -1,0 +1,13 @@
+[Unit]
+Description=Z Flip 5 6 GiB ZRAM (zstd) and 8 GiB UFS swapfile
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/steamos-arm/b5q-zram-swap
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Z Flip 5 Qualcomm ADSP FastRPC / Sensors Daemon (hexagonrpcd)
+After=systemd-modules-load.service systemd-udevd.service
+Before=sound.target sm8550-audio-setup.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/steamos-arm/b5q-hexagonrpcd-start
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

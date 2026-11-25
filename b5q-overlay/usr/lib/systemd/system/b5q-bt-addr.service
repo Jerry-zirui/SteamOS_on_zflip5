@@ -1,0 +1,13 @@
+[Unit]
+Description=Z Flip 5 WCN6855 static Bluetooth address (02:B5:73:10:00:02)
+After=systemd-modules-load.service systemd-udevd.service
+Before=bluetooth.service sm8550-bluetooth-setup.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/lib/steamos-arm/b5q-bt-addr
+RemainAfterExit=yes
+TimeoutStartSec=45
+
+[Install]
+WantedBy=multi-user.target

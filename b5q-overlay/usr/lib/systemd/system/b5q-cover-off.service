@@ -1,0 +1,14 @@
+[Unit]
+Description=Z Flip 5 cover display hardware reset hold (TLMM GPIO 42)
+After=systemd-udevd.service
+Wants=systemd-udevd.service
+Before=display-manager.service b5q-touchd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/b5q-cover-off
+SuccessExitStatus=1
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

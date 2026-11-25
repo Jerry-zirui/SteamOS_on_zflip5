@@ -1,0 +1,13 @@
+[Unit]
+Description=Z Flip 5 Synaptics S3916A IRQ Touchscreen Daemon (b5q-touchd)
+After=systemd-udevd.service b5q-cover-off.service systemd-modules-load.service
+Before=display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/b5q-touchd
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

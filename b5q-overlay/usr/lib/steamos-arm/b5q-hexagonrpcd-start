@@ -1,0 +1,32 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jerry-zirui (https://github.com/Jerry-zirui/SteamOS_on_zflip5)
+set -eu
+
+modprobe -q qrtr_smd 2>/dev/null || true
+
+for i in $(seq 1 30); do
+    [ -c /dev/fastrpc-adsp ] && break
+    sleep 0.5
+done
+
+if [ ! -c /dev/fastrpc-adsp ]; then
+    echo "b5q-hexagonrpcd: /dev/fastrpc-adsp not found" >&2
+    exit 1
+fi
+
+PID_ROOT=""
+PID_SENS=""
+cleanup() {
+    [ -n "$PID_SENS" ] && kill "$PID_SENS" 2>/dev/null || true
+    [ -n "$PID_ROOT" ] && kill "$PID_ROOT" 2>/dev/null || true
+}
+trap cleanup TERM INT EXIT
+
+/usr/local/bin/hexagonrpcd -f /dev/fastrpc-adsp -d adsp -R /usr/share/qcom &
+PID_ROOT=$!
+
+/usr/local/bin/hexagonrpcd -f /dev/fastrpc-adsp -d adsp -s -R /usr/share/qcom &
+PID_SENS=$!
+
+wait "$PID_ROOT" "$PID_SENS"

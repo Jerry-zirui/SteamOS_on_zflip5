@@ -1,0 +1,41 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jerry-zirui (https://github.com/Jerry-zirui/SteamOS_on_zflip5)
+# Configure 6 GiB zstd ZRAM + 8 GiB UFS swapfile for 8 GiB SM8550 FEX/Proton headroom.
+set -u
+
+modprobe -q zram 2>/dev/null || true
+
+if ! grep -q '^/dev/zram0 ' /proc/swaps 2>/dev/null; then
+    if [ -e /sys/block/zram0 ]; then
+        swapoff /dev/zram0 2>/dev/null || true
+        echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+        echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+        echo 6442450944 > /sys/block/zram0/disksize 2>/dev/null || true
+        mkswap -L zram-b5q /dev/zram0 >/dev/null 2>&1 && swapon -p 100 /dev/zram0 || true
+    fi
+fi
+
+SWAP_PATH=""
+if mountpoint -q /mnt/host 2>/dev/null; then
+    mkdir -p /mnt/host/steamos
+    SWAP_PATH=/mnt/host/steamos/swapfile
+else
+    SWAP_PATH=/swapfile
+fi
+
+if [ ! -f "$SWAP_PATH" ]; then
+    echo "b5q-zram-swap: creating 8 GiB swapfile at $SWAP_PATH..."
+    if ! fallocate -l 8G "$SWAP_PATH" 2>/dev/null; then
+        dd if=/dev/zero of="$SWAP_PATH" bs=1M count=8192 status=none
+    fi
+    chmod 600 "$SWAP_PATH"
+    mkswap -L b5q-swap "$SWAP_PATH" >/dev/null 2>&1 || true
+fi
+
+if [ -f "$SWAP_PATH" ] && ! grep -q "$SWAP_PATH" /proc/swaps 2>/dev/null; then
+    chmod 600 "$SWAP_PATH"
+    swapon -p 10 "$SWAP_PATH" 2>/dev/null || true
+fi
+
+exit 0

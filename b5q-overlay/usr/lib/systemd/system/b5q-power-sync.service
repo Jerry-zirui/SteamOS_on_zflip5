@@ -1,0 +1,12 @@
+[Unit]
+Description=Z Flip 5 deferred RPMh & interconnect sync_state release
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 8
+ExecStart=/usr/local/bin/b5q-power-sync
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

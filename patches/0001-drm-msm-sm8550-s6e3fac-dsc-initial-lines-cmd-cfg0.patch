@@ -1,0 +1,89 @@
+From: Samsung Z Flip 5 (SM-F7310) Mainline Linux 7.3.5 Bring-up
+Subject: [PATCH] drm/msm: Fix SM8550 DPU DSC initial_lines and DSI CMD_CFG0 for S6E3FAC 120Hz OLED
+
+On Qualcomm SM8550 (DPU 9.0 + DSI 6G v2.7) driving the Samsung S6E3FAC
+(AMF670BS03) 1080x2640@120Hz Command-Mode DSC 1.1 panel (2 slices of 540x40):
+
+1. dpu_encoder_dsc_initial_line_calc() computes initial_lines = 2
+   (ENC_DF_CTRL = 0x257c0002), whereas stock Samsung ABL programs
+   initial_lines = 3 (ENC_DF_CTRL = 0x257c0003). Starting rate-buffer drain
+   one line too early produces a regular 60x10-pixel staggered dark-cell
+   artifact across every 540x40 slice. Clamping initial_lines to >= 3
+   eliminates the artifact completely.
+
+2. dsi_ctrl_enable() overwrites REG_DSI_CMD_CFG0 (0x3c) with 0x00000008,
+   clearing the hardware-default upper configuration bits 0x06100000
+   (including INTERLEAVE_MAX) preserved by stock ABL (0x06100008). Preserve
+   bits [27:20] via read-modify-write.
+
+3. msm_mdss_init() runs msm_mdss_reset() at entry while Samsung ABL's
+   MDSS/DPU clocks are still active under clk_ignore_unused, which leaves
+   display controller state corrupted on reboot. Defer msm_mdss_reset()
+   until after devm_clk_bulk_get_all() and cycle clk_bulk_prepare_enable()
+   / clk_bulk_disable_unprepare() to cleanly gate MDSS clocks off before
+   asserting reset.
+
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c |  2 +-
+ drivers/gpu/drm/msm/dsi/dsi_host.c          |  3 ++-
+ drivers/gpu/drm/msm/msm_mdss.c              | 11 ++++++++---
+ 3 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+index 111111111111..222222222222 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -1984,7 +1984,7 @@ dpu_encoder_dsc_initial_line_calc(struct drm_dsc_config *dsc,
+ 	total_pixels = ssm_delay * 3 + dsc->initial_xmit_delay + 47;
+ 	if (soft_slice_per_enc > 1)
+ 		total_pixels += (ssm_delay * 3);
+-	return DIV_ROUND_UP(total_pixels, dsc->slice_width);
++	return max_t(u32, 3, DIV_ROUND_UP(total_pixels, dsc->slice_width));
+ }
+ 
+ static void dpu_encoder_dsc_pipe_cfg(struct dpu_hw_ctl *ctl,
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index 111111111111..222222222222 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -851,7 +851,8 @@ static void dsi_ctrl_enable(struct msm_dsi_host *msm_host,
+ 		dsi_write(msm_host, REG_DSI_VID_CFG1, 0);
+ 	} else {
+ 		/* Do not swap RGB colors */
+-		data = DSI_CMD_CFG0_RGB_SWAP(SWAP_RGB);
++		data = dsi_read(msm_host, REG_DSI_CMD_CFG0) & 0x0ff00000;
++		data |= DSI_CMD_CFG0_RGB_SWAP(SWAP_RGB);
+ 		data |= DSI_CMD_CFG0_DST_FORMAT(dsi_get_cmd_fmt(mipi_fmt));
+ 		dsi_write(msm_host, REG_DSI_CMD_CFG0, data);
+ 
+diff --git a/drivers/gpu/drm/msm/msm_mdss.c b/drivers/gpu/drm/msm/msm_mdss.c
+index 111111111111..222222222222 100644
+--- a/drivers/gpu/drm/msm/msm_mdss.c
++++ b/drivers/gpu/drm/msm/msm_mdss.c
+@@ -369,10 +369,8 @@ static struct msm_mdss *msm_mdss_init(struct platform_device *pdev, bool is_mdp5)
+ 	int ret;
+ 	int irq;
+ 
+-	ret = msm_mdss_reset(&pdev->dev);
+-	if (ret)
+-		return ERR_PTR(ret);
++	/* msm_mdss_reset moved after clock gate to preserve ABL MDSS state */
+ 
+ 	msm_mdss = devm_kzalloc(&pdev->dev, sizeof(*msm_mdss), GFP_KERNEL);
+ 	if (!msm_mdss)
+ 		return ERR_PTR(-ENOMEM);
+@@ -407,7 +405,14 @@ static struct msm_mdss *msm_mdss_init(struct platform_device *pdev, bool is_mdp5)
+ 	}
+ 	msm_mdss->num_clocks = ret;
+ 	msm_mdss->is_mdp5 = is_mdp5;
+ 
++	if (!is_mdp5 && clk_bulk_prepare_enable(msm_mdss->num_clocks, msm_mdss->clocks) == 0)
++		clk_bulk_disable_unprepare(msm_mdss->num_clocks, msm_mdss->clocks);
++
++	ret = msm_mdss_reset(&pdev->dev);
++	if (ret)
++		return ERR_PTR(ret);
++
+ 	msm_mdss->dev = &pdev->dev;
+ 
+ 	irq = platform_get_irq(pdev, 0);

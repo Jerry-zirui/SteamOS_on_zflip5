@@ -1,0 +1,48 @@
+NOTICE & ATTRIBUTION REQUIREMENTS
+=================================
+
+Project: SteamOS ARM64 on Samsung Galaxy Z Flip 5 (SM-F7310 / samsung-b5q)
+Source Repository: https://github.com/Jerry-zirui/SteamOS_on_zflip5
+Copyright (C) 2026 Jerry-zirui
+
+1. STRICT COPYLEFT LICENSING
+----------------------------
+Unless explicitly stated otherwise in an individual file's SPDX header:
+
+- All original userspace daemons, scripts, systemd units, overlays, UCM2 /
+  AudioReach topology configurations, and project documentation in this
+  repository are licensed under the GNU General Public License v3.0 only
+  (`GPL-3.0-only`). See the `LICENSE` file in the repository root.
+
+- All Linux kernel drivers, Device Tree sources (`dts/`), and Linux kernel
+  patches (`drivers/panel-samsung-s6e3fac-b5q.c`,
+  `drivers/synaptics_s3916_sec.c`, `dts/sm8550-samsung-b5q.dts`,
+  `patches/0001-*.patch`, `patches/0003-*.patch`) are licensed under the GNU
+  General Public License v2.0 only (`GPL-2.0-only`) for strict compatibility
+  with the Linux kernel.
+
+Any derivative work, redistribution, modification, or binary distribution built
+from or incorporating code/configurations from this repository MUST remain
+open-source with complete corresponding source code provided under the same
+applicable GPL license (`GPL-3.0-only` / `GPL-2.0-only`).
+
+2. UPSTREAM & HARDWARE LAYER ATTRIBUTIONS
+-----------------------------------------
+- Hardware bring-up layer (`SM-F7310` DTS, S6E3FAC DSC panel driver, kernel
+  patches, AudioReach/UCM2 configs, `b5q-*` userspace daemons) originates from:
+    postmarketOS_on_zflip5 by Jerry-zirui
+    https://github.com/Jerry-zirui/postmarketOS_on_zflip5
+
+- SteamOS ARM64 / Zaviya userspace & SM8550 overlay patterns (GPL-2.0):
+    Zaviya by hashtagbasit (based on Valve SteamOS for ARM / Holo Core)
+    https://github.com/hashtagbasit/Zaviya
+
+- Other upstream projects: Linux Kernel (GPL-2.0-only), linux-msm/audioreach-topology,
+  Goodix-vas/tfa9878-qcom-ar-6.6, hexagonrpcd & libssc, Valve SteamOS / Gamescope /
+  Proton / FEX-Emu, Mesa Turnip, KDE Plasma, PipeWire, WirePlumber, BlueZ.
+
+3. PROPRIETARY FIRMWARE EXCLUSION
+---------------------------------
+No proprietary vendor firmware binaries (e.g., Qualcomm `adsp.mbn`,
+`a740_zap.mbn`, `WCN6855` WLAN/BT firmware & BDFs, `tfa98xx.cnt`) are
+distributed in this repository. Users must extract them from their own device.

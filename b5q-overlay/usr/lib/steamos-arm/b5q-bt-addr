@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jerry-zirui (https://github.com/Jerry-zirui/SteamOS_on_zflip5)
+"""Set static public Bluetooth address (02:B5:73:10:00:02) on WCN6855 hci0 for Z Flip 5."""
+import ctypes
+import os
+import select
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+MODEL = "/sys/firmware/devicetree/base/model"
+ADDR_STR = "02:B5:73:10:00:02"
+ADDR = bytes.fromhex(ADDR_STR.replace(":", ""))
+
+AF_BLUETOOTH, BTPROTO_HCI, HCI_DEV_NONE, HCI_CHANNEL_CONTROL = 31, 1, 0xFFFF, 3
+MGMT_EV_CMD_COMPLETE, MGMT_EV_CMD_STATUS = 0x0001, 0x0002
+MGMT_OP_READ_UNCONF_INDEX_LIST = 0x0036
+MGMT_OP_READ_CONFIG_INFO = 0x0037
+MGMT_OP_SET_PUBLIC_ADDRESS = 0x0039
+MGMT_OPTION_PUBLIC_ADDRESS = 1 << 1
+INDEX = 0
+
+
+def log(msg: str) -> None:
+    print(f"b5q-bt-addr: {msg}", flush=True)
+
+
+class Mgmt:
+    def __init__(self) -> None:
+        self.sock = socket.socket(AF_BLUETOOTH, socket.SOCK_RAW, BTPROTO_HCI)
+        libc = ctypes.CDLL(None, use_errno=True)
+        addr = struct.pack("<HHH", AF_BLUETOOTH, HCI_DEV_NONE, HCI_CHANNEL_CONTROL)
+        if libc.bind(self.sock.fileno(), addr, len(addr)):
+            raise OSError(ctypes.get_errno(), "bind to Bluetooth mgmt socket")
+
+    def cmd(self, op: int, index: int, data: bytes = b""):
+        self.sock.send(struct.pack("<HHH", op, index, len(data)) + data)
+        deadline = time.monotonic() + 5
+        while (left := deadline - time.monotonic()) > 0:
+            if not select.select([self.sock], [], [], left)[0]:
+                break
+            pkt = self.sock.recv(1024)
+            ev, idx = struct.unpack("<HH", pkt[:4])
+            if (
+                ev in (MGMT_EV_CMD_COMPLETE, MGMT_EV_CMD_STATUS)
+                and idx == index
+                and len(pkt) >= 9
+                and struct.unpack("<H", pkt[6:8])[0] == op
+            ):
+                return pkt[8], pkt[9:]
+        return None, b""
+
+    def unconfigured(self):
+        status, rp = self.cmd(MGMT_OP_READ_UNCONF_INDEX_LIST, HCI_DEV_NONE)
+        if status != 0 or len(rp) < 2:
+            return []
+        n = struct.unpack("<H", rp[:2])[0]
+        return list(struct.unpack(f"<{n}H", rp[2 : 2 + 2 * n]))
+
+    def missing_options(self, index: int):
+        status, rp = self.cmd(MGMT_OP_READ_CONFIG_INFO, index)
+        if status != 0 or len(rp) < 10:
+            return None
+        return struct.unpack("<I", rp[6:10])[0]
+
+
+def main() -> int:
+    try:
+        if "Samsung Galaxy Z Flip5" not in open(MODEL, encoding="utf-8", errors="ignore").read():
+            return 0
+    except OSError:
+        return 0
+
+    for mod in ("bluetooth", "btqca", "hci_uart"):
+        subprocess.run(["modprobe", "-q", mod], check=False)
+
+    try:
+        mgmt = Mgmt()
+    except OSError as e:
+        log(f"no Bluetooth mgmt socket: {e}")
+        return 0
+
+    for _ in range(60):
+        if INDEX in mgmt.unconfigured():
+            break
+        if os.path.exists(f"/sys/class/bluetooth/hci{INDEX}") and mgmt.missing_options(INDEX) == 0:
+            log(f"hci{INDEX} already configured")
+            return 0
+        time.sleep(0.5)
+    else:
+        log(f"hci{INDEX} did not appear as unconfigured")
+        return 0
+
+    missing = mgmt.missing_options(INDEX)
+    if missing is not None and not (missing & MGMT_OPTION_PUBLIC_ADDRESS):
+        log(f"hci{INDEX} does not need public address (missing={missing:#x})")
+        return 0
+
+    status, _ = mgmt.cmd(MGMT_OP_SET_PUBLIC_ADDRESS, INDEX, ADDR[::-1])
+    if status != 0:
+        log(f"setting {ADDR_STR} failed (mgmt status={status})")
+        return 1
+    log(f"set public BD_ADDR {ADDR_STR}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

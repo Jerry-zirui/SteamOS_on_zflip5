@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jerry-zirui (https://github.com/Jerry-zirui/SteamOS_on_zflip5)
+# Trigger deferred interconnect & RPMh power domain sync_state after drivers load,
+# releasing ABL boot-time INT_MAX DDR/bus votes so LPDDR5X and CX/MX scale dynamically.
+for f in \
+    /sys/devices/platform/interconnect-*/state_synced \
+    /sys/devices/platform/soc@0/*.interconnect/state_synced \
+    /sys/devices/platform/soc@0/17a00000.rsc/17a00000.rsc:power-controller/state_synced
+do
+    [ -e "$f" ] || continue
+    if [ "$(cat "$f" 2>/dev/null)" = "0" ]; then
+        printf "1" > "$f" 2>/dev/null && echo "synced: $f" || echo "skip/err: $f"
+    fi
+done

@@ -1,0 +1,15 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jerry-zirui (https://github.com/Jerry-zirui/SteamOS_on_zflip5)
+# Power WCN6855 hci0 strictly through bluetoothd D-Bus (mgmt), never `hciconfig hci0 up`,
+# so Bluetooth gamepads (including Flydigi Wee) auto-reconnect reliably across reboots.
+set -u
+modprobe -q bluetooth btqca hci_uart 2>/dev/null || true
+rfkill unblock bluetooth wifi 2>/dev/null || true
+for _ in $(seq 30); do
+  busctl set-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 \
+    Powered b true 2>/dev/null && exit 0
+  sleep 0.5
+done
+echo "b5q-bt-power: bluetoothd did not register hci0 in time" >&2
+exit 0

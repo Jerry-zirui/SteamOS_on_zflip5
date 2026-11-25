@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jerry-zirui (https://github.com/Jerry-zirui/SteamOS_on_zflip5)
+# Usage: b5q-reboot [linux|android|download]
+TARGET="${1:-linux}"
+sync
+case "$TARGET" in
+  linux|recovery)
+    exec python3 -c "import ctypes; l=ctypes.CDLL(None,use_errno=True); r=l.syscall(ctypes.c_long(142),ctypes.c_uint(0xfee1dead),ctypes.c_uint(0x28121969),ctypes.c_uint(0xa1b2c3d4),ctypes.c_char_p(b\"recovery\")); print(r, ctypes.get_errno())"
+    ;;
+  download|bootloader)
+    exec python3 -c "import ctypes; l=ctypes.CDLL(None,use_errno=True); r=l.syscall(ctypes.c_long(142),ctypes.c_uint(0xfee1dead),ctypes.c_uint(0x28121969),ctypes.c_uint(0xa1b2c3d4),ctypes.c_char_p(b\"bootloader\")); print(r, ctypes.get_errno())"
+    ;;
+  android|normal)
+    exec /sbin/reboot -f
+    ;;
+  *)
+    echo "Usage: b5q-reboot [linux|android|download]"
+    exit 1
+    ;;
+esac
