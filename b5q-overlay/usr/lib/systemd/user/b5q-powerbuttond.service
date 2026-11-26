@@ -1,0 +1,14 @@
+[Unit]
+Description=Samsung Galaxy Z Flip 5 Power Button Daemon (short=sleep, long=power menu)
+After=steam.service
+PartOf=gamescope-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/hwsupport/steamos-powerbuttond
+Restart=on-failure
+RestartSec=2
+Slice=session.slice
+
+[Install]
+WantedBy=gamescope-session.target

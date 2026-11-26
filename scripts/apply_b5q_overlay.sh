@@ -152,6 +152,7 @@ chown -R root:root "$R/usr/local/bin/"b5q-* "$R/usr/lib/steamos-arm/"b5q-* \
                    "$R/usr/lib/systemd/system/gpu-trace.service.d" \
                    "$R/usr/lib/systemd/system/steamos-log-submitter.service.d" \
                    "$R/usr/lib/systemd/system/firewalld.service.d" \
+                   "$R/usr/lib/systemd/system/systemd-suspend.service.d" \
                    "$R/usr/lib/environment.d/60-b5q-gamescope.conf" \
                    "$R/usr/lib/modules-load.d/b5q.conf" \
                    "$R/usr/lib/udev/rules.d/60-b5q-gamepads.rules" \
@@ -176,6 +177,7 @@ chmod 0644 "$R/usr/lib/systemd/system/"b5q-*.service \
            "$R/usr/lib/systemd/system/gpu-trace.service.d/99-b5q-disable.conf" \
            "$R/usr/lib/systemd/system/steamos-log-submitter.service.d/99-b5q-disable.conf" \
            "$R/usr/lib/systemd/system/firewalld.service.d/99-b5q-disable.conf" \
+           "$R/usr/lib/systemd/system/systemd-suspend.service.d/20-b5q-standby.conf" \
            "$R/usr/lib/environment.d/60-b5q-gamescope.conf" \
            "$R/usr/lib/modules-load.d/b5q.conf" \
            "$R/usr/lib/udev/rules.d/60-b5q-gamepads.rules" \
@@ -184,6 +186,8 @@ chmod 0644 "$R/usr/lib/systemd/system/"b5q-*.service \
 mkdir -p "$R/usr/lib/systemd/user/gamescope-session.target.wants"
 ln -sfn ../b5q-gamescope-ultrawide.service \
     "$R/usr/lib/systemd/user/gamescope-session.target.wants/b5q-gamescope-ultrawide.service"
+ln -sfn ../b5q-powerbuttond.service \
+    "$R/usr/lib/systemd/user/gamescope-session.target.wants/b5q-powerbuttond.service"
 
 ln -sfn ../../Qualcomm/sm8550/SM8550-Samsung-B5Q.conf \
     "$R/usr/share/alsa/ucm2/conf.d/sm8550/SM8550-Samsung-B5Q.conf"

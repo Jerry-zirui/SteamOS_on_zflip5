@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jerry-zirui (https://github.com/Jerry-zirui/SteamOS_on_zflip5)
+"""b5q-standby: Instant-wake, zero-hang sleep for Samsung Galaxy Z Flip 5 (SM8550).
+
+Mainline kernel s2idle/deep suspend hangs on resume on SM-F7310 (WCN6855/PMIC).
+Steam's Sleep (single power press via steamos-powerbuttond -> steam://shortpowerpress
+or Power Menu -> Sleep) goes through logind -> systemd-suspend.service -> this script:
+
+  1. Pauses Steam-launched game process trees (SIGSTOP).
+  2. Turns backlight off, suspends PipeWire sinks/sources, stops b5q-touchd, and
+     powers off the S6E3FAC AMOLED panel via `gamescopectl drm_sleep_internal_screen 1`.
+  3. Freezes Steam/Gamescope/game cgroups (keeping PipeWire/WirePlumber/D-Bus alive)
+     and freezes b5q-powerd/inputplumber.
+  4. Drops all CPU policies to cpuinfo_min_freq (NO CPU hotplug and NO GPU clamp on
+     SM8550: Adreno 740 GMU can wedge if CPUs are offlined during standby).
+  5. Waits for the next full KEY_POWER press+release on pmic_pwrkey (or SIGUSR1),
+     then cleanly restores clocks, audio, session cgroups, S6E3FAC panel, backlight,
+     b5q-touchd, games, and b5q-powerd limits.
+"""
+from __future__ import annotations
+
+import glob
+import os
+import pwd
+import select
+import signal
+import struct
+import subprocess
+import sys
+import time
+
+FLAG = "/run/b5q-standby"
+EV = struct.Struct("llHHi")
+EV_KEY, KEY_POWER = 1, 116
+UID_STEAM = 1000
+KEEP_RUNNING = {
+    "pipewire.service",
+    "pipewire-pulse.service",
+    "wireplumber.service",
+    "dbus-broker.service",
+    "at-spi-dbus-bus.service",
+    "init.scope",
+}
+FREEZE_SYSTEM = [
+    "/sys/fs/cgroup/system.slice/inputplumber.service",
+    "/sys/fs/cgroup/system.slice/b5q-powerd.service",
+]
+
+
+def log(msg: str) -> None:
+    print(f"b5q-standby: {msg}", flush=True)
+
+
+def rd(path: str, default: str = "") -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return default
+
+
+def wr(path: str, val) -> bool:
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(str(val))
+        return True
+    except OSError:
+        return False
+
+
+def run(*cmd: str, env: dict | None = None, timeout: int = 15) -> int:
+    try:
+        return subprocess.run(
+            cmd,
+            env=env,
+            check=False,
+            timeout=timeout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+    except (OSError, subprocess.TimeoutExpired):
+        return 1
+
+
+def steam_user() -> pwd.struct_passwd | None:
+    for name in ("steamos", "deck"):
+        try:
+            return pwd.getpwnam(name)
+        except KeyError:
+            pass
+    try:
+        return pwd.getpwuid(UID_STEAM)
+    except KeyError:
+        return None
+
+
+def as_user(*cmd: str, extra_env: dict[str, str] | None = None, capture: bool = False) -> str:
+    pw = steam_user()
+    if not pw:
+        return ""
+    env = {
+        "HOME": pw.pw_dir,
+        "USER": pw.pw_name,
+        "XDG_RUNTIME_DIR": f"/run/user/{pw.pw_uid}",
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{pw.pw_uid}/bus",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+    }
+    if extra_env:
+        env.update(extra_env)
+    try:
+        res = subprocess.run(
+            cmd,
+            env=env,
+            user=pw.pw_uid,
+            group=pw.pw_gid,
+            check=False,
+            timeout=5,
+            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return res.stdout if capture else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def audio_suspend(suspend: bool) -> None:
+    pw = steam_user()
+    if not pw or not os.path.exists(f"/run/user/{pw.pw_uid}/pulse/native"):
+        return
+    flag = "1" if suspend else "0"
+    for kind in ("sinks", "sources"):
+        out = as_user("pactl", "list", "short", kind, capture=True)
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and not parts[1].endswith(".monitor"):
+                as_user("pactl", f"suspend-{kind[:-1]}", parts[1], flag)
+
+
+def gamescope_screen(sleep: bool) -> None:
+    pw = steam_user()
+    if not pw:
+        return
+    rdir = f"/run/user/{pw.pw_uid}"
+    flag = "1" if sleep else "0"
+    for sock in sorted(glob.glob(f"{rdir}/gamescope-*")):
+        name = os.path.basename(sock)
+        if name.endswith(".lock") or not os.path.exists(sock):
+            continue
+        as_user(
+            "/usr/local/bin/gamescopectl",
+            "drm_sleep_internal_screen",
+            flag,
+            extra_env={"GAMESCOPE_WAYLAND_DISPLAY": name},
+        )
+
+
+def game_pids() -> list[int]:
+    children: dict[int, list[int]] = {}
+    roots: list[int] = []
+    for p in os.listdir("/proc"):
+        if not p.isdigit():
+            continue
+        try:
+            with open(f"/proc/{p}/stat", "rb") as fh:
+                st = fh.read()
+            ppid = int(st[st.rfind(b")") + 2:].split()[1])
+            with open(f"/proc/{p}/cmdline", "rb") as fh:
+                cmd = fh.read()
+        except (OSError, ValueError, IndexError):
+            continue
+        children.setdefault(ppid, []).append(int(p))
+        if b"reaper\0SteamLaunch\0" in cmd:
+            roots.append(int(p))
+    out: list[int] = []
+    stack = list(roots)
+    while stack:
+        pid = stack.pop()
+        for c in children.get(pid, ()):
+            out.append(c)
+            stack.append(c)
+    return out
+
+
+def power_key_fd() -> int | None:
+    for e in sorted(glob.glob("/sys/class/input/event*")):
+        if rd(f"{e}/device/name") in ("pmic_pwrkey", "pm8941_pwrkey"):
+            return os.open(f"/dev/input/{os.path.basename(e)}", os.O_RDONLY)
+    return None
+
+
+def freeze_targets() -> list[str]:
+    pw = steam_user()
+    if not pw:
+        return []
+    try:
+        own = next(
+            line.split(":", 2)[2].strip()
+            for line in open("/proc/self/cgroup", encoding="utf-8")
+            if line.startswith("0::")
+        )
+    except (OSError, StopIteration):
+        return []
+    own = os.path.normpath("/sys/fs/cgroup" + own)
+    out: list[str] = []
+    for user in glob.glob(f"/sys/fs/cgroup/user.slice/user-{pw.pw_uid}.slice"):
+        for child in sorted(os.listdir(user)):
+            path = os.path.join(user, child)
+            if not os.path.isdir(path):
+                continue
+            if not (child.startswith("user@") and child.endswith(".service")):
+                out.append(path)
+                continue
+            for sub in sorted(os.listdir(path)):
+                spath = os.path.join(path, sub)
+                if not os.path.isdir(spath) or sub in KEEP_RUNNING:
+                    continue
+                if sub != "session.slice":
+                    out.append(spath)
+                    continue
+                for unit in sorted(os.listdir(spath)):
+                    upath = os.path.join(spath, unit)
+                    if os.path.isdir(upath) and unit not in KEEP_RUNNING:
+                        out.append(upath)
+    return [p for p in out if own != p and not own.startswith(p + "/")]
+
+
+def set_frozen(cgroups: list[str], frozen: bool) -> list[str]:
+    done = [cg for cg in cgroups if wr(f"{cg}/cgroup.freeze", 1 if frozen else 0)]
+    if frozen:
+        end = time.monotonic() + 2.0
+        while time.monotonic() < end and any(
+            "frozen 1" not in rd(f"{cg}/cgroup.events") for cg in done
+        ):
+            time.sleep(0.05)
+    return done
+
+
+def battery_pct() -> str:
+    for b in sorted(glob.glob("/sys/class/power_supply/*")):
+        if rd(f"{b}/type") == "Battery":
+            return rd(f"{b}/capacity", "?")
+    return "?"
+
+
+WAKE_R, WAKE_W = os.pipe()
+
+
+def wait_power_press(fd: int) -> None:
+    """Block until a full KEY_POWER press+release on pmic_pwrkey or SIGUSR1."""
+    pressed = False
+    while True:
+        r, _, _ = select.select([fd, WAKE_R], [], [])
+        if WAKE_R in r:
+            log("wake requested (SIGUSR1)")
+            return
+        if fd in r:
+            data = os.read(fd, EV.size * 64)
+            for off in range(0, len(data) - EV.size + 1, EV.size):
+                _s, _u, t, code, val = EV.unpack_from(data, off)
+                if t == EV_KEY and code == KEY_POWER:
+                    if val == 1:
+                        pressed = True
+                    elif val == 0 and pressed:
+                        log("wake: power key")
+                        return
+
+
+def main() -> int:
+    fd = power_key_fd()
+    if fd is None:
+        log("no pmic_pwrkey input device; aborting standby")
+        return 1
+
+    open(FLAG, "w", encoding="utf-8").close()
+    saved_bl: dict[str, str] = {}
+    saved_cpu: dict[str, tuple[str, str]] = {}
+    paused: list[int] = []
+    frozen: list[str] = []
+    touch_stopped = False
+
+    try:
+        # Drain the sleep-triggering press/release so it does not immediately wake
+        time.sleep(0.5)
+        os.set_blocking(fd, False)
+        try:
+            while os.read(fd, EV.size * 64):
+                pass
+        except BlockingIOError:
+            pass
+        os.set_blocking(fd, True)
+
+        signal.signal(signal.SIGUSR1, lambda *_: os.write(WAKE_W, b"x"))
+
+        for pid in game_pids():
+            try:
+                os.kill(pid, signal.SIGSTOP)
+                paused.append(pid)
+            except OSError:
+                pass
+
+        for bl in sorted(glob.glob("/sys/class/backlight/*")):
+            br = f"{bl}/brightness"
+            saved_bl[br] = rd(br)
+            wr(br, 0)
+
+        audio_suspend(True)
+
+        if run("systemctl", "stop", "b5q-touchd.service") == 0:
+            touch_stopped = True
+
+        gamescope_screen(True)
+        time.sleep(0.3)
+
+        targets = freeze_targets() + [c for c in FREEZE_SYSTEM if os.path.isdir(c)]
+        frozen = set_frozen(targets, True)
+
+        # Drop all CPU clusters to minimum clock (keep all CPUs online and GPU unclamped for SM8550 GMU safety)
+        for pol in sorted(glob.glob("/sys/devices/system/cpu/cpufreq/policy*")):
+            min_f = rd(f"{pol}/cpuinfo_min_freq")
+            saved_cpu[pol] = (rd(f"{pol}/scaling_min_freq"), rd(f"{pol}/scaling_max_freq"))
+            if min_f:
+                wr(f"{pol}/scaling_min_freq", min_f)
+                wr(f"{pol}/scaling_max_freq", min_f)
+
+        t0, b0 = time.monotonic(), battery_pct()
+        log(f"asleep: paused={len(paused)} games, frozen={len(frozen)} cgroups, screen=off, batt={b0}%")
+        wait_power_press(fd)
+        dt = time.monotonic() - t0
+        log(f"waking after {dt:.1f}s (batt {b0}% -> {battery_pct()}%)")
+    finally:
+        # Restore CPU clocks first, then audio, then unfreeze apps, then panel + touch
+        for pol, (old_min, old_max) in saved_cpu.items():
+            if old_max:
+                wr(f"{pol}/scaling_max_freq", old_max)
+            if old_min:
+                wr(f"{pol}/scaling_min_freq", old_min)
+
+        audio_suspend(False)
+
+        if frozen:
+            set_frozen(frozen, False)
+
+        gamescope_screen(False)
+        for br, val in saved_bl.items():
+            if val:
+                wr(br, val)
+
+        if touch_stopped:
+            run("systemctl", "start", "b5q-touchd.service")
+
+        for pid in paused:
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except OSError:
+                pass
+
+        # Re-apply active b5q-powerd profile caps cleanly
+        run("systemctl", "kill", "-s", "HUP", "b5q-powerd.service")
+        time.sleep(0.4)
+        try:
+            os.remove(FLAG)
+        except OSError:
+            pass
+        os.close(fd)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

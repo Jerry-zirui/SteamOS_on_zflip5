@@ -22,6 +22,7 @@ import glob
 import json
 import os
 import pwd
+import signal
 import subprocess
 import sys
 
@@ -486,6 +487,14 @@ def main() -> int:
         Gio.BusType.SYSTEM, BUS_NAME, Gio.BusNameOwnerFlags.NONE,
         on_bus, None, lambda *_: (log("lost bus name"), loop.quit()),
     )
+    def on_sighup(*_args) -> bool:
+        svc.thermal_level = 0
+        svc.temp_hist.clear()
+        svc.apply_limits(apply_refresh=False)
+        log(f"reapplied limits on SIGHUP (profile={svc.state['profile']})")
+        return True
+
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGHUP, on_sighup)
     GLib.timeout_add_seconds(2, svc.tick)
     loop = GLib.MainLoop()
     loop.run()
