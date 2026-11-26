@@ -17,6 +17,7 @@ Gamescope target refresh (60 Hz for Silent/Balanced, 120 Hz for Turbo).
 """
 from __future__ import annotations
 
+import collections
 import glob
 import json
 import os
@@ -37,28 +38,33 @@ REMOTES_BATT = "/etc/steamos-manager/remotes.d/50-steamos-arm-battery.toml"
 TDP_MIN_W = 3
 TDP_MAX_W = 12
 POWER_EXP = 2.5
-HYSTERESIS_MC = 4000
+HYSTERESIS_MC = 3000
+POLICY0_TDP_FLOOR_KHZ = 787200
 
+# Fanless 7mm smartphone thermal/power curve for Snapdragon 8 Gen 2 (SM8550):
+#   Silent   : ~2.5-3.5 W cool operation (X3 held at 1.0 GHz, GPU 295 MHz, 60 Hz)
+#   Balanced : ~4.0-5.0 W daily gaming/UI (big/prime 1.54/1.59 GHz, GPU 401 MHz, 60 Hz)
+#   Turbo    : full burst / external cooler (2.80/2.96 GHz, GPU 680 MHz, 120 Hz)
 PROFILES = {
     "silent": {
         "label": "Silent",
-        "cpu0_max": 1555200,
-        "cpu3_max": 1651200,
-        "cpu7_max": 1708800,
-        "gpu_max": 401000000,
+        "cpu0_max": 1113600,
+        "cpu3_max": 1171200,
+        "cpu7_max": 998400,
+        "gpu_max": 295000000,
         "refresh": 60,
-        "soft_mc": 65000,
-        "hard_mc": 72000,
+        "soft_mc": 55000,
+        "hard_mc": 62000,
     },
     "balanced": {
         "label": "Balanced",
-        "cpu0_max": 2016000,
-        "cpu3_max": 2054400,
-        "cpu7_max": 2227200,
-        "gpu_max": 475000000,
+        "cpu0_max": 1459200,
+        "cpu3_max": 1536000,
+        "cpu7_max": 1593600,
+        "gpu_max": 401000000,
         "refresh": 60,
-        "soft_mc": 72000,
-        "hard_mc": 78000,
+        "soft_mc": 62000,
+        "hard_mc": 68000,
     },
     "turbo": {
         "label": "Turbo",
@@ -67,8 +73,8 @@ PROFILES = {
         "cpu7_max": 2956800,
         "gpu_max": 680000000,
         "refresh": 120,
-        "soft_mc": 80000,
-        "hard_mc": 85000,
+        "soft_mc": 78000,
+        "hard_mc": 84000,
     },
 }
 
@@ -249,6 +255,7 @@ class B5QPower:
             if os.path.isdir(f"/sys/devices/system/cpu/cpufreq/{pol}")
         }
         self.tz_paths = find_thermal_zones()
+        self.temp_hist: collections.deque[int] = collections.deque(maxlen=3)
         self.thermal_level = 0
         self.last_refresh_sent: int | None = None
         self.last_snap = self.snapshot()
@@ -267,7 +274,10 @@ class B5QPower:
 
     def update_thermal_level(self) -> bool:
         prof = PROFILES[self.state["profile"]]
-        t = self.max_soc_temp_mc()
+        raw_t = self.max_soc_temp_mc()
+        if raw_t > 0:
+            self.temp_hist.append(raw_t)
+        t = sum(self.temp_hist) // len(self.temp_hist) if self.temp_hist else raw_t
         old = self.thermal_level
         lvl = old
         if old == 0:
@@ -287,7 +297,7 @@ class B5QPower:
                 lvl = 1
         if lvl != old:
             self.thermal_level = lvl
-            log(f"thermal level {old} -> {lvl} (soc={t/1000:.1f}C, profile={self.state['profile']})")
+            log(f"thermal level {old} -> {lvl} (soc_avg={t/1000:.1f}C, profile={self.state['profile']})")
             return True
         return False
 
@@ -303,23 +313,27 @@ class B5QPower:
             except (TypeError, ValueError):
                 frac = None
 
-        cpu_steps = (0, 2, 4)[self.thermal_level]
+        little_steps = (0, 1, 2)[self.thermal_level]
+        big_steps = (0, 2, 4)[self.thermal_level]
         gpu_steps = (0, 1, 2)[self.thermal_level]
 
-        # CPU clusters
-        for pol, key, use_tdp in (
-            ("policy0", "cpu0_max", False),
-            ("policy3", "cpu3_max", True),
-            ("policy7", "cpu7_max", True),
+        # CPU clusters (TDP + thermal step-down apply across all clusters; policy0 keeps UI floor)
+        for pol, key, steps, floor in (
+            ("policy0", "cpu0_max", little_steps, POLICY0_TDP_FLOOR_KHZ),
+            ("policy3", "cpu3_max", big_steps, 0),
+            ("policy7", "cpu7_max", big_steps, 0),
         ):
             freqs = self.cpu_freqs.get(pol)
             if not freqs:
                 continue
             cap = snap_le(freqs, prof[key])
-            if use_tdp and frac is not None:
-                cap = min(cap, power_cap_freq(freqs, frac))
-            if use_tdp and cpu_steps > 0:
-                cap = snap_step_down(freqs, cap, cpu_steps)
+            if frac is not None:
+                tdp_cap = power_cap_freq(freqs, frac)
+                if floor:
+                    tdp_cap = max(tdp_cap, snap_le(freqs, floor))
+                cap = min(cap, tdp_cap)
+            if steps > 0:
+                cap = snap_step_down(freqs, cap, steps)
             wr(f"/sys/devices/system/cpu/cpufreq/{pol}/scaling_max_freq", cap)
 
         # Adreno 740 GPU
