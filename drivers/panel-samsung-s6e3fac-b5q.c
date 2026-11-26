@@ -16,6 +16,8 @@
 
 #include <drm/display/drm_dsc.h>
 #include <drm/display/drm_dsc_helper.h>
+#include <drm/drm_connector.h>
+#include <drm/drm_crtc.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_panel.h>
@@ -24,6 +26,7 @@
 struct s6e3fac_b5q {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
+	struct drm_connector *connector;
 	struct drm_dsc_config dsc;
 	struct gpio_desc *reset_gpio;
 	struct regulator_bulk_data *supplies;
@@ -70,11 +73,31 @@ static void s6e3fac_b5q_reset(struct s6e3fac_b5q *ctx)
 	usleep_range(10000, 11000);
 }
 
+static unsigned int s6e3fac_b5q_get_vrefresh(struct s6e3fac_b5q *ctx)
+{
+	struct drm_connector *connector = ctx->connector;
+	struct drm_crtc_state *crtc_state;
+
+	if (!connector || !connector->state || !connector->state->crtc)
+		return 60;
+
+	crtc_state = connector->state->crtc->state;
+	if (!crtc_state)
+		return 60;
+
+	return drm_mode_vrefresh(&crtc_state->mode) <= 75 ? 60 : 120;
+}
+
 static int s6e3fac_b5q_on(struct s6e3fac_b5q *ctx)
 {
 	struct mipi_dsi_device *dsi = ctx->dsi;
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
 	struct drm_dsc_picture_parameter_set pps;
+	unsigned int vrefresh = s6e3fac_b5q_get_vrefresh(ctx);
+	u8 te_sel = (vrefresh == 60) ? 0x03 : 0x01;
+	u8 lfd = (vrefresh == 60) ? 0x01 : 0x00;
+	u8 te_cmd[4] = { 0xB9, 0x61, 0x00, te_sel };
+	u8 lfd_cmd[3] = { 0xBD, 0x00, lfd };
 	u16 br = ctx->panel.backlight ? ctx->panel.backlight->props.brightness : 1024;
 
 	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
@@ -156,16 +179,16 @@ static int s6e3fac_b5q_on(struct s6e3fac_b5q *ctx)
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xF8, 0x00);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xF0, 0xA5, 0xA5);
 
-	/* 9. TSP_SYNC_ENABLE (120Hz) */
+	/* 9. TSP_SYNC_ENABLE (120Hz: 0x01, 60Hz: 0x03) */
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xF0, 0x5A, 0x5A);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB9, 0x61, 0x00, 0x01);
+	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, te_cmd, sizeof(te_cmd));
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB0, 0x00, 0x0C, 0xB9);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB9, 0x05, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB0, 0x00, 0x28, 0xB9);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB9, 0x59, 0x29);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xF0, 0xA5, 0xA5);
 
-	/* 10. VRR_SETTING (120Hz HS, LFDMAX=120, LFDMIN=120, RevC) */
+	/* 10. VRR_SETTING (HS mode: 120Hz LFD=0x0000 TE=0x01, 60Hz LFD=0x0001 TE=0x03, RevC) */
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9F, 0xA5, 0xA5);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xF0, 0x5A, 0x5A);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xFC, 0x5A, 0x5A);
@@ -185,14 +208,14 @@ static int s6e3fac_b5q_on(struct s6e3fac_b5q *ctx)
 				     0x09, 0xA8, 0x09, 0xA8, 0x01, 0xAD,
 				     0x01, 0xAD, 0x01, 0xAD, 0x01, 0xAD);
 
-	/* FREQ 120Hz */
+	/* FREQ HS (0x60 0x00 for both 120Hz HS and 60Hz HS) */
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x60, 0x00);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB0, 0x00, 0x0A, 0xBD);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xBD, 0x40);
 
-	/* LFD MAX = 120Hz (0x0000) */
+	/* LFD MAX (120Hz: 0x0000, 60Hz: 0x0001) */
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB0, 0x00, 0x1F, 0xBD);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xBD, 0x00, 0x00);
+	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, lfd_cmd, sizeof(lfd_cmd));
 
 	/* VRR TH */
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB0, 0x00, 0x07, 0xBD);
@@ -200,18 +223,18 @@ static int s6e3fac_b5q_on(struct s6e3fac_b5q *ctx)
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB0, 0x00, 0x11, 0xBD);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xBD, 0x10);
 
-	/* LFD MIN = 120Hz (0x0000) */
+	/* LFD MIN (120Hz: 0x0000, 60Hz: 0x0001) */
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB0, 0x00, 0x14, 0xBD);
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xBD, 0x00, 0x00);
+	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, lfd_cmd, sizeof(lfd_cmd));
 
-	/* Frame insertion (LFDMIN 120) */
+	/* Frame insertion (identical for LFDMIN 120 and LFDMIN 60) */
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB0, 0x00, 0x7B, 0xBD);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xBD,
 				     0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01,
 				     0x00, 0x01, 0x02, 0x00, 0x00, 0x00);
 
-	/* TE_FRAME_SEL (120Hz) */
-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB9, 0x61, 0x00, 0x01);
+	/* TE_FRAME_SEL (120Hz: 0x01, 60Hz: 0x03) */
+	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, te_cmd, sizeof(te_cmd));
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB0, 0x00, 0x0C, 0xB9);
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xB9, 0x05, 0x28, 0x00, 0x00);
 
@@ -260,6 +283,9 @@ static int s6e3fac_b5q_on(struct s6e3fac_b5q *ctx)
 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xFC, 0xA5, 0xA5);
 
 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
+	if (!dsi_ctx.accum_err)
+		dev_info(&dsi->dev, "S6E3FAC initialized at %u Hz (LFD=0x%02x, TE=0x%02x)\n",
+			 vrefresh, lfd, te_sel);
 	return dsi_ctx.accum_err;
 }
 
@@ -343,29 +369,74 @@ static int s6e3fac_b5q_unprepare(struct drm_panel *panel)
 }
 
 /*
- * Native 1080x2640 @ 120Hz (matches fhd120hs in SM-F7310 fdt.dts).
- * Horizontal porches are tuned so msm_dsi's compressed pclk calculation
- * yields ~951 Mbps bit clock, matching qcom,mdss-dsi-panel-clockrate
- * (951000000 Hz) and FFC_SET_0 (951 Mbps).
+ * Native 1080x2640 @ 60Hz (default preferred for fanless power efficiency) and 120Hz HS
+ * (matches fhd60hs / fhd120hs in SM-F7310 fdt.dts).
+ * Both modes keep the exact same 393,891 kHz pixel clock (~951.22 Mbps DSI bit clock,
+ * matching qcom,mdss-dsi-panel-clockrate = 951000000 and FFC_SET_0 = 951 Mbps);
+ * 393,891 kHz (rounded up by 1 kHz) guarantees both kernel DIV_ROUND_CLOSEST and
+ * Gamescope Lua math.floor compute exact 60 Hz and 120 Hz.
  */
-static const struct drm_display_mode s6e3fac_b5q_mode = {
-	.clock = (1080 + 42 + 42 + 41) * (2640 + 24 + 28 + 32) * 120 / 1000,
-	.hdisplay = 1080,
-	.hsync_start = 1080 + 42,
-	.hsync_end = 1080 + 42 + 42,
-	.htotal = 1080 + 42 + 42 + 41,
-	.vdisplay = 2640,
-	.vsync_start = 2640 + 24,
-	.vsync_end = 2640 + 24 + 28,
-	.vtotal = 2640 + 24 + 28 + 32,
-	.width_mm = 64,
-	.height_mm = 158,
+static const struct drm_display_mode s6e3fac_b5q_modes[] = {
+	{
+		.clock = 393891,
+		.hdisplay = 1080,
+		.hsync_start = 1080 + 42,
+		.hsync_end = 1080 + 42 + 42,
+		.htotal = 1080 + 42 + 42 + 41,
+		.vdisplay = 2640,
+		.vsync_start = 2640 + 2748,
+		.vsync_end = 2640 + 2748 + 28,
+		.vtotal = 2640 + 2748 + 28 + 32,
+		.width_mm = 64,
+		.height_mm = 158,
+		.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
+	},
+	{
+		.clock = 393891,
+		.hdisplay = 1080,
+		.hsync_start = 1080 + 42,
+		.hsync_end = 1080 + 42 + 42,
+		.htotal = 1080 + 42 + 42 + 41,
+		.vdisplay = 2640,
+		.vsync_start = 2640 + 24,
+		.vsync_end = 2640 + 24 + 28,
+		.vtotal = 2640 + 24 + 28 + 32,
+		.width_mm = 64,
+		.height_mm = 158,
+		.type = DRM_MODE_TYPE_DRIVER,
+	},
 };
+
+static unsigned int max_refresh = 60;
+module_param(max_refresh, uint, 0644);
+MODULE_PARM_DESC(max_refresh, "Maximum advertised refresh rate in Hz (60 or 120; default 60)");
 
 static int s6e3fac_b5q_get_modes(struct drm_panel *panel,
 				 struct drm_connector *connector)
 {
-	return drm_connector_helper_get_modes_fixed(connector, &s6e3fac_b5q_mode);
+	struct s6e3fac_b5q *ctx = to_s6e3fac_b5q(panel);
+	struct drm_display_mode *mode;
+	unsigned int i, count = 0;
+
+	ctx->connector = connector;
+
+	for (i = 0; i < ARRAY_SIZE(s6e3fac_b5q_modes); i++) {
+		if (i > 0 && max_refresh < 120)
+			continue;
+
+		mode = drm_mode_duplicate(connector->dev, &s6e3fac_b5q_modes[i]);
+		if (!mode)
+			return -ENOMEM;
+
+		drm_mode_set_name(mode);
+		drm_mode_probed_add(connector, mode);
+		count++;
+	}
+
+	connector->display_info.width_mm = s6e3fac_b5q_modes[0].width_mm;
+	connector->display_info.height_mm = s6e3fac_b5q_modes[0].height_mm;
+
+	return count;
 }
 
 static const struct drm_panel_funcs s6e3fac_b5q_funcs = {
@@ -462,7 +533,8 @@ static int s6e3fac_b5q_probe(struct mipi_dsi_device *dsi)
 		return ret;
 	}
 
-	dev_info(dev, "Samsung S6E3FAC (AMF670BS03) 1080x2640@120Hz DSC panel probed\n");
+	dev_info(dev, "Samsung S6E3FAC (AMF670BS03) 1080x2640 60/120Hz DSC panel probed (max_refresh=%u)\n",
+		 max_refresh);
 	return 0;
 }
 

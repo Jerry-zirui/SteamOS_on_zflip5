@@ -149,6 +149,9 @@ chown -R root:root "$R/usr/local/bin/"b5q-* "$R/usr/lib/steamos-arm/"b5q-* \
                    "$R/usr/lib/systemd/system/"b5q-*.service \
                    "$R/usr/lib/systemd/user/"b5q-*.service \
                    "$R/usr/lib/systemd/system/sm8550-bluetooth-setup.service.d" \
+                   "$R/usr/lib/systemd/system/gpu-trace.service.d" \
+                   "$R/usr/lib/systemd/system/steamos-log-submitter.service.d" \
+                   "$R/usr/lib/systemd/system/firewalld.service.d" \
                    "$R/usr/lib/environment.d/60-b5q-gamescope.conf" \
                    "$R/usr/lib/modules-load.d/b5q.conf" \
                    "$R/usr/lib/udev/rules.d/60-b5q-gamepads.rules" \
@@ -170,6 +173,9 @@ fi
 chmod 0644 "$R/usr/lib/systemd/system/"b5q-*.service \
            "$R/usr/lib/systemd/user/"b5q-*.service \
            "$R/usr/lib/systemd/system/sm8550-bluetooth-setup.service.d/10-b5q.conf" \
+           "$R/usr/lib/systemd/system/gpu-trace.service.d/99-b5q-disable.conf" \
+           "$R/usr/lib/systemd/system/steamos-log-submitter.service.d/99-b5q-disable.conf" \
+           "$R/usr/lib/systemd/system/firewalld.service.d/99-b5q-disable.conf" \
            "$R/usr/lib/environment.d/60-b5q-gamescope.conf" \
            "$R/usr/lib/modules-load.d/b5q.conf" \
            "$R/usr/lib/udev/rules.d/60-b5q-gamepads.rules" \
@@ -398,7 +404,7 @@ done
 
 for u in sshd.service b5q-cover-off.service b5q-touchd.service \
          b5q-bt-addr.service b5q-hexagonrpcd.service b5q-power-sync.service \
-         b5q-usb-ncm.service b5q-zram-swap.service; do
+         b5q-powerd.service b5q-usb-ncm.service b5q-zram-swap.service; do
     enable_unit "$u" multi-user.target
 done
 

@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Jerry-zirui (https://github.com/Jerry-zirui/SteamOS_on_zflip5)
+"""b5q-powerd: Fanless power, thermal & refresh-rate daemon for Samsung Galaxy Z Flip 5.
+
+Implements org.steamos_arm.Power on the system D-Bus so steamos-manager
+(via /usr/share/steamos-manager/remotes.d/50-steamos-arm.toml) exposes native
+SteamOS Quick Access controls without any handheld fan/LED daemon (konkrd):
+
+  - PerformanceProfile1  : Silent / Balanced / Turbo
+  - TdpLimit1            : 3 W .. 12 W (f^2.5 nonlinear OPP cap on big/prime CPU & GPU)
+  - GpuPerformanceLevel1 : auto / manual (220 .. 680 MHz Adreno 740 OPPs)
+
+Also runs a lightweight 2s fanless soft-thermal loop (with 4 C hysteresis) to
+step down CPU/GPU caps smoothly before the SM8550 hits 85-90 C, and switches
+Gamescope target refresh (60 Hz for Silent/Balanced, 120 Hz for Turbo).
+"""
+from __future__ import annotations
+
+import glob
+import json
+import os
+import pwd
+import subprocess
+import sys
+
+import gi
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+BUS_NAME = "org.steamos_arm.Power"
+PATH = "/org/steamos_arm/Power"
+IFACE = "com.steampowered.SteamOSManager1."
+STATE_FILE = "/var/lib/b5q-power/state.json"
+REMOTES_BATT = "/etc/steamos-manager/remotes.d/50-steamos-arm-battery.toml"
+
+TDP_MIN_W = 3
+TDP_MAX_W = 12
+POWER_EXP = 2.5
+HYSTERESIS_MC = 4000
+
+PROFILES = {
+    "silent": {
+        "label": "Silent",
+        "cpu0_max": 1555200,
+        "cpu3_max": 1651200,
+        "cpu7_max": 1708800,
+        "gpu_max": 401000000,
+        "refresh": 60,
+        "soft_mc": 65000,
+        "hard_mc": 72000,
+    },
+    "balanced": {
+        "label": "Balanced",
+        "cpu0_max": 2016000,
+        "cpu3_max": 2054400,
+        "cpu7_max": 2227200,
+        "gpu_max": 475000000,
+        "refresh": 60,
+        "soft_mc": 72000,
+        "hard_mc": 78000,
+    },
+    "turbo": {
+        "label": "Turbo",
+        "cpu0_max": 2016000,
+        "cpu3_max": 2803200,
+        "cpu7_max": 2956800,
+        "gpu_max": 680000000,
+        "refresh": 120,
+        "soft_mc": 80000,
+        "hard_mc": 85000,
+    },
+}
+
+LABEL_TO_KEY = {v["label"].lower(): k for k, v in PROFILES.items()}
+
+XML = f"""
+<node>
+  <interface name="{IFACE}PerformanceProfile1">
+    <property name="AvailablePerformanceProfiles" type="as" access="read"/>
+    <property name="PerformanceProfile" type="s" access="readwrite"/>
+    <property name="SuggestedDefaultPerformanceProfile" type="s" access="read"/>
+  </interface>
+  <interface name="{IFACE}TdpLimit1">
+    <property name="TdpLimit" type="u" access="readwrite"/>
+    <property name="TdpLimitMin" type="u" access="read"/>
+    <property name="TdpLimitMax" type="u" access="read"/>
+  </interface>
+  <interface name="{IFACE}GpuPerformanceLevel1">
+    <property name="AvailableGpuPerformanceLevels" type="as" access="read"/>
+    <property name="GpuPerformanceLevel" type="s" access="readwrite"/>
+    <property name="ManualGpuClock" type="u" access="readwrite"/>
+    <property name="ManualGpuClockMin" type="u" access="read"/>
+    <property name="ManualGpuClockMax" type="u" access="read"/>
+  </interface>
+  <interface name="org.steamos_arm.Power1">
+    <property name="BypassCharging" type="b" access="readwrite"/>
+    <property name="BypassLevel" type="i" access="read"/>
+    <property name="BypassSupported" type="b" access="read"/>
+  </interface>
+  <interface name="{IFACE}BatteryChargeLimit1">
+    <property name="MaxChargeLevel" type="i" access="readwrite"/>
+    <property name="SuggestedMinimumLimit" type="i" access="read"/>
+  </interface>
+</node>
+"""
+
+
+def log(msg: str) -> None:
+    print(f"b5q-powerd: {msg}", file=sys.stderr, flush=True)
+
+
+def rd(path: str, default: str = "") -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return default
+
+
+def wr(path: str, val) -> bool:
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(str(val))
+        return True
+    except OSError:
+        return False
+
+
+def read_state() -> dict:
+    try:
+        with open(STATE_FILE, encoding="utf-8") as fh:
+            d = json.load(fh)
+        if isinstance(d, dict):
+            return d
+    except (OSError, ValueError, TypeError):
+        pass
+    return {"profile": "balanced", "tdp": None, "gpu_manual_mhz": None}
+
+
+def write_state(st: dict) -> None:
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    tmp = f"{STATE_FILE}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(st, fh, indent=2)
+    os.replace(tmp, STATE_FILE)
+
+
+def gpu_dir() -> str | None:
+    for d in sorted(glob.glob("/sys/class/devfreq/*")):
+        bn = os.path.basename(d)
+        if "gpu" in bn or "3d00000" in bn:
+            return d
+    return None
+
+
+def avail_ints(path: str) -> list[int]:
+    return sorted(int(x) for x in rd(path).split() if x.isdigit())
+
+
+def snap_le(freqs: list[int], target: int) -> int:
+    below = [f for f in freqs if f <= target]
+    return below[-1] if below else freqs[0]
+
+
+def snap_step_down(freqs: list[int], cap: int, steps: int) -> int:
+    idx = 0
+    for i, f in enumerate(freqs):
+        if f <= cap:
+            idx = i
+    return freqs[max(0, idx - steps)]
+
+
+def power_cap_freq(freqs: list[int], frac: float) -> int:
+    top = freqs[-1]
+    lo = (freqs[0] / top) ** POWER_EXP
+    budget = lo + frac * (1.0 - lo)
+    fits = [f for f in freqs if (f / top) ** POWER_EXP <= budget + 1e-9]
+    return fits[-1] if fits else freqs[0]
+
+
+def find_thermal_zones() -> list[str]:
+    wanted = ("cpu7-top-thermal", "gpuss-0-thermal", "cpuss0-thermal")
+    found = []
+    for tz in sorted(glob.glob("/sys/class/thermal/thermal_zone*")):
+        if rd(f"{tz}/type") in wanted:
+            found.append(f"{tz}/temp")
+    return found
+
+
+PANEL_MAX_REFRESH = "/sys/module/panel_samsung_s6e3fac_b5q/parameters/max_refresh"
+
+
+def set_gamescope_refresh(hz: int, nudge: bool = True) -> bool:
+    """Update S6E3FAC DRM max_refresh cap and nudge Gamescope Xwayland :0 to switch live."""
+    wr(PANEL_MAX_REFRESH, hz)
+    if not os.path.exists("/tmp/.X11-unix/X0"):
+        return False
+    try:
+        pw = pwd.getpwnam("steamos")
+    except KeyError:
+        try:
+            pw = pwd.getpwnam("deck")
+        except KeyError:
+            return False
+    env = {
+        "DISPLAY": ":0",
+        "XDG_RUNTIME_DIR": f"/run/user/{pw.pw_uid}",
+        "HOME": pw.pw_dir,
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+    }
+    atoms = [("GAMESCOPE_DYNAMIC_REFRESH", hz), ("GAMESCOPE_FPS_LIMIT", hz)]
+    if nudge:
+        atoms.append(("GAMESCOPE_DISPLAY_MODE_NUDGE", 1))
+    ok = False
+    for atom, val in atoms:
+        try:
+            res = subprocess.run(
+                ["xprop", "-root", "-f", atom, "32c", "-set", atom, str(val)],
+                env=env,
+                user=pw.pw_uid,
+                group=pw.pw_gid,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=False,
+            )
+            if res.returncode == 0:
+                ok = True
+        except Exception:
+            pass
+    return ok
+
+
+class B5QPower:
+    def __init__(self) -> None:
+        self.conn = None
+        self.state = read_state()
+        if self.state.get("profile") not in PROFILES:
+            self.state["profile"] = "balanced"
+        self.gdir = gpu_dir()
+        self.gfreqs = avail_ints(f"{self.gdir}/available_frequencies") if self.gdir else []
+        self.gmin_mhz = self.gfreqs[0] // 1_000_000 if self.gfreqs else 220
+        self.gmax_mhz = self.gfreqs[-1] // 1_000_000 if self.gfreqs else 680
+        self.manual_mhz = int(self.state.get("gpu_manual_mhz") or self.gmax_mhz)
+        self.cpu_freqs = {
+            pol: avail_ints(f"/sys/devices/system/cpu/cpufreq/{pol}/scaling_available_frequencies")
+            for pol in ("policy0", "policy3", "policy7")
+            if os.path.isdir(f"/sys/devices/system/cpu/cpufreq/{pol}")
+        }
+        self.tz_paths = find_thermal_zones()
+        self.thermal_level = 0
+        self.last_refresh_sent: int | None = None
+        self.last_snap = self.snapshot()
+        self.apply_limits(apply_refresh=True)
+
+    def max_soc_temp_mc(self) -> int:
+        best = 0
+        for p in self.tz_paths:
+            try:
+                t = int(rd(p, "0"))
+                if t > best:
+                    best = t
+            except ValueError:
+                pass
+        return best
+
+    def update_thermal_level(self) -> bool:
+        prof = PROFILES[self.state["profile"]]
+        t = self.max_soc_temp_mc()
+        old = self.thermal_level
+        lvl = old
+        if old == 0:
+            if t >= prof["hard_mc"]:
+                lvl = 2
+            elif t >= prof["soft_mc"]:
+                lvl = 1
+        elif old == 1:
+            if t >= prof["hard_mc"]:
+                lvl = 2
+            elif t < prof["soft_mc"] - HYSTERESIS_MC:
+                lvl = 0
+        else:  # old == 2
+            if t < prof["soft_mc"] - HYSTERESIS_MC:
+                lvl = 0
+            elif t < prof["hard_mc"] - HYSTERESIS_MC:
+                lvl = 1
+        if lvl != old:
+            self.thermal_level = lvl
+            log(f"thermal level {old} -> {lvl} (soc={t/1000:.1f}C, profile={self.state['profile']})")
+            return True
+        return False
+
+    def apply_limits(self, apply_refresh: bool = False) -> None:
+        prof = PROFILES[self.state["profile"]]
+        tdp = self.state.get("tdp")
+        frac = None
+        if tdp is not None:
+            try:
+                w = float(tdp)
+                if w < TDP_MAX_W:
+                    frac = max(0.0, min(1.0, (w - TDP_MIN_W) / (TDP_MAX_W - TDP_MIN_W)))
+            except (TypeError, ValueError):
+                frac = None
+
+        cpu_steps = (0, 2, 4)[self.thermal_level]
+        gpu_steps = (0, 1, 2)[self.thermal_level]
+
+        # CPU clusters
+        for pol, key, use_tdp in (
+            ("policy0", "cpu0_max", False),
+            ("policy3", "cpu3_max", True),
+            ("policy7", "cpu7_max", True),
+        ):
+            freqs = self.cpu_freqs.get(pol)
+            if not freqs:
+                continue
+            cap = snap_le(freqs, prof[key])
+            if use_tdp and frac is not None:
+                cap = min(cap, power_cap_freq(freqs, frac))
+            if use_tdp and cpu_steps > 0:
+                cap = snap_step_down(freqs, cap, cpu_steps)
+            wr(f"/sys/devices/system/cpu/cpufreq/{pol}/scaling_max_freq", cap)
+
+        # Adreno 740 GPU
+        if self.gdir and self.gfreqs:
+            manual = self.state.get("gpu_manual_mhz")
+            if manual:
+                target = min(self.gfreqs, key=lambda x: abs(x - int(manual) * 1_000_000))
+                if gpu_steps > 0:
+                    target = snap_step_down(self.gfreqs, target, gpu_steps)
+                wr(f"{self.gdir}/max_freq", self.gfreqs[-1])
+                wr(f"{self.gdir}/min_freq", target)
+                wr(f"{self.gdir}/max_freq", target)
+            else:
+                cap = snap_le(self.gfreqs, prof["gpu_max"])
+                if frac is not None:
+                    cap = min(cap, power_cap_freq(self.gfreqs, frac))
+                if gpu_steps > 0:
+                    cap = snap_step_down(self.gfreqs, cap, gpu_steps)
+                wr(f"{self.gdir}/min_freq", self.gfreqs[0])
+                wr(f"{self.gdir}/max_freq", cap)
+
+        if apply_refresh:
+            hz = prof["refresh"]
+            if set_gamescope_refresh(hz, nudge=True):
+                self.last_refresh_sent = hz
+            else:
+                self.last_refresh_sent = None
+
+    def values(self) -> dict:
+        prof_label = PROFILES[self.state["profile"]]["label"]
+        tdp_val = int(self.state.get("tdp") or TDP_MAX_W)
+        manual = self.state.get("gpu_manual_mhz")
+        return {
+            "PerformanceProfile1": {
+                "AvailablePerformanceProfiles": GLib.Variant("as", [v["label"] for v in PROFILES.values()]),
+                "PerformanceProfile": GLib.Variant("s", prof_label),
+                "SuggestedDefaultPerformanceProfile": GLib.Variant("s", "Balanced"),
+            },
+            "TdpLimit1": {
+                "TdpLimit": GLib.Variant("u", tdp_val),
+                "TdpLimitMin": GLib.Variant("u", TDP_MIN_W),
+                "TdpLimitMax": GLib.Variant("u", TDP_MAX_W),
+            },
+            "GpuPerformanceLevel1": {
+                "AvailableGpuPerformanceLevels": GLib.Variant("as", ["auto", "manual"]),
+                "GpuPerformanceLevel": GLib.Variant("s", "manual" if manual else "auto"),
+                "ManualGpuClock": GLib.Variant("u", int(manual or self.manual_mhz)),
+                "ManualGpuClockMin": GLib.Variant("u", self.gmin_mhz),
+                "ManualGpuClockMax": GLib.Variant("u", self.gmax_mhz),
+            },
+            "Power1": {
+                "BypassCharging": GLib.Variant("b", False),
+                "BypassLevel": GLib.Variant("i", 0),
+                "BypassSupported": GLib.Variant("b", False),
+            },
+            "BatteryChargeLimit1": {
+                "MaxChargeLevel": GLib.Variant("i", -1),
+                "SuggestedMinimumLimit": GLib.Variant("i", 55),
+            },
+        }
+
+    def snapshot(self) -> dict:
+        return {k: {pk: pv.unpack() for pk, pv in props.items()} for k, props in self.values().items()}
+
+    def get(self, _conn, _sender, _path, iface, prop):
+        short = iface.split(".")[-1]
+        return self.values().get(short, {}).get(prop)
+
+    def set(self, _conn, _sender, _path, iface, prop, value):
+        short = iface.split(".")[-1]
+        v = value.unpack()
+        apply_refresh = False
+        if short == "PerformanceProfile1" and prop == "PerformanceProfile":
+            key = LABEL_TO_KEY.get(str(v).lower())
+            if not key:
+                return False
+            apply_refresh = (key != self.state["profile"])
+            self.state["profile"] = key
+            self.thermal_level = 0
+            log(f"profile -> {key}")
+        elif short == "TdpLimit1" and prop == "TdpLimit":
+            w = max(TDP_MIN_W, min(TDP_MAX_W, int(v)))
+            self.state["tdp"] = None if w >= TDP_MAX_W else w
+            log(f"tdp -> {w}W")
+        elif short == "GpuPerformanceLevel1" and prop == "GpuPerformanceLevel":
+            if str(v).lower() == "manual":
+                self.state["gpu_manual_mhz"] = self.manual_mhz
+            else:
+                self.state["gpu_manual_mhz"] = None
+            log(f"gpu level -> {v}")
+        elif short == "GpuPerformanceLevel1" and prop == "ManualGpuClock":
+            mhz = max(self.gmin_mhz, min(self.gmax_mhz, int(v)))
+            self.manual_mhz = mhz
+            if self.state.get("gpu_manual_mhz") is not None:
+                self.state["gpu_manual_mhz"] = mhz
+            log(f"gpu manual clock -> {mhz} MHz")
+        else:
+            return False
+
+        write_state(self.state)
+        self.apply_limits(apply_refresh=apply_refresh)
+        GLib.idle_add(self.announce)
+        return True
+
+    def announce(self) -> bool:
+        now = self.snapshot()
+        if self.conn:
+            full_map = self.values()
+            for short, props in now.items():
+                changed = {k: v for k, v in props.items() if self.last_snap.get(short, {}).get(k) != v}
+                if not changed:
+                    continue
+                dbus_iface = "org.steamos_arm.Power1" if short == "Power1" else IFACE + short
+                self.conn.emit_signal(
+                    None, PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                    GLib.Variant("(sa{sv}as)", (dbus_iface, {k: full_map[short][k] for k in changed}, [])),
+                )
+        self.last_snap = now
+        return False
+
+    def tick(self) -> bool:
+        # Once Gamescope X0 appears after boot, apply initial profile refresh once
+        if self.last_refresh_sent is None and os.path.exists("/tmp/.X11-unix/X0"):
+            hz = PROFILES[self.state["profile"]]["refresh"]
+            if set_gamescope_refresh(hz, nudge=False):
+                self.last_refresh_sent = hz
+        if self.update_thermal_level():
+            self.apply_limits(apply_refresh=False)
+        return True
+
+
+def main() -> int:
+    # max77705 has no charge_control_end_threshold; ensure stale battery remote is absent
+    if os.path.exists(REMOTES_BATT):
+        try:
+            os.remove(REMOTES_BATT)
+        except OSError:
+            pass
+
+    svc = B5QPower()
+    node = Gio.DBusNodeInfo.new_for_xml(XML)
+
+    def on_bus(conn, _name):
+        svc.conn = conn
+        for iface in node.interfaces:
+            conn.register_object(PATH, iface, None, svc.get, svc.set)
+        log(f"serving {BUS_NAME} (profile={svc.state['profile']}, tdp={svc.state.get('tdp') or TDP_MAX_W}W)")
+
+    Gio.bus_own_name(
+        Gio.BusType.SYSTEM, BUS_NAME, Gio.BusNameOwnerFlags.NONE,
+        on_bus, None, lambda *_: (log("lost bus name"), loop.quit()),
+    )
+    GLib.timeout_add_seconds(2, svc.tick)
+    loop = GLib.MainLoop()
+    loop.run()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

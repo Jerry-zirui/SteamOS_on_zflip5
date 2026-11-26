@@ -1,11 +1,12 @@
 -- SPDX-License-Identifier: GPL-3.0-only
 -- Copyright (C) 2026 Jerry-zirui (https://github.com/Jerry-zirui/SteamOS_on_zflip5)
 --
--- Samsung Galaxy Z Flip 5 (SM-F7310 / b5q) internal AMOLED (1080x2640 portrait, 120 Hz).
--- Matches EDID-less DSI panel via DT model string and uses exact stock S6E3FAC timings.
+-- Samsung Galaxy Z Flip 5 (SM-F7310 / b5q) internal AMOLED (1080x2640 portrait, 60/120 Hz HS).
+-- Matches EDID-less DSI panel via DT model string and uses exact stock S6E3FAC 951 Mbps timings
+-- (fixed pixel clock 393,890 kHz with stretched VFP for 60 Hz, matching panel-samsung-s6e3fac-b5q.c).
 
-local b5q_refresh_rates = { 120 }
-local HTOTAL, VTOTAL = 1205, 2724
+local b5q_refresh_rates = { 60, 120 }
+local FIXED_CLOCK = 393891
 
 local function is_b5q()
     local ok, f = pcall(io.open, "/sys/firmware/devicetree/base/model", "r")
@@ -28,9 +29,11 @@ gamescope.config.known_displays.b5q_amoled = {
     },
     dynamic_modegen = function(base_mode, refresh)
         local mode = base_mode
-        mode.clock = math.floor(HTOTAL * VTOTAL * refresh / 1000 + 0.5)
+        local vfp = (refresh <= 75) and 2748 or 24
+        mode.clock = FIXED_CLOCK
+        gamescope.modegen.adjust_front_porch(mode, vfp)
         mode.vrefresh = gamescope.modegen.calc_vrefresh(mode)
-        debug("[b5q_amoled] " .. refresh .. "Hz: clock " .. mode.clock)
+        debug("[b5q_amoled] " .. refresh .. "Hz: clock=" .. mode.clock .. " vtotal=" .. mode.vtotal .. " vref=" .. mode.vrefresh)
         return mode
     end,
     matches = function(display)
