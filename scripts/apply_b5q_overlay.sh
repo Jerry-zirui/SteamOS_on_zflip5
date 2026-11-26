@@ -152,8 +152,21 @@ chown -R root:root "$R/usr/local/bin/"b5q-* "$R/usr/lib/steamos-arm/"b5q-* \
                    "$R/usr/lib/environment.d/60-b5q-gamescope.conf" \
                    "$R/usr/lib/modules-load.d/b5q.conf" \
                    "$R/usr/lib/udev/rules.d/60-b5q-gamepads.rules" \
-                   "$R/usr/lib/NetworkManager/conf.d/45-b5q-usb0-unmanaged.conf"
-chmod 0755 "$R/usr/local/bin/"b5q-* "$R/usr/lib/steamos-arm/"b5q-*
+                   "$R/usr/lib/NetworkManager/conf.d/45-b5q-usb0-unmanaged.conf" \
+                   "$R/usr/lib/NetworkManager/dispatcher.d/50-b5q-wifi-btcoex"
+chmod 0755 "$R/usr/local/bin/"b5q-* "$R/usr/lib/steamos-arm/"b5q-* \
+           "$R/usr/lib/NetworkManager/dispatcher.d/50-b5q-wifi-btcoex"
+# WCN6855 5 GHz + 2.4 GHz BDF: upstream linux-firmware qmi-board-id=34618 mapped to
+# B5Q (17cb:0108, qmi-chip-id=18, qmi-board-id=255) enables full 80 MHz 5 GHz TX/RX.
+if [ -f "$R/usr/lib/firmware/ath11k/WCN6855/hw2.1/board-2.bin" ]; then
+    mkdir -p "$R/usr/lib/firmware/ath11k/WCN6855/hw2.0"
+    cp -f "$R/usr/lib/firmware/ath11k/WCN6855/hw2.1/board-2.bin" \
+          "$R/usr/lib/firmware/ath11k/WCN6855/hw2.0/board-2.bin"
+    chown root:root "$R/usr/lib/firmware/ath11k/WCN6855/hw2.1/board-2.bin" \
+                    "$R/usr/lib/firmware/ath11k/WCN6855/hw2.0/board-2.bin"
+    chmod 0644 "$R/usr/lib/firmware/ath11k/WCN6855/hw2.1/board-2.bin" \
+               "$R/usr/lib/firmware/ath11k/WCN6855/hw2.0/board-2.bin"
+fi
 chmod 0644 "$R/usr/lib/systemd/system/"b5q-*.service \
            "$R/usr/lib/systemd/user/"b5q-*.service \
            "$R/usr/lib/systemd/system/sm8550-bluetooth-setup.service.d/10-b5q.conf" \
