@@ -391,7 +391,8 @@ for u in steamos-sm8550-expand-home.service konkrd.service \
          steamos-arm-power.service odin3-thor-autoinstall.service \
          dsp_service.service iris-driver-rebind.service \
          steamos-arm-update.service steamos-arm-update-cleanup.service \
-         steamos-arm-efi-sync.service firewalld.service softapmanager.service; do
+         steamos-arm-efi-sync.service firewalld.service softapmanager.service \
+         gpu-trace.service steamos-log-submitter.service; do
     mask_unit "$u"
 done
 
